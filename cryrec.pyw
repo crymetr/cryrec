@@ -9,11 +9,14 @@ Portable mode: if a file named "portable" sits next to the exe, settings live th
 import json
 import os
 import queue
+import subprocess
 import sys
 import threading
 import time
 import tkinter as tk
+import urllib.request
 import wave
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -25,7 +28,7 @@ import soundfile as sf
 import soxr
 
 APP = "CryRec"
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -38,6 +41,10 @@ CHUNK_MS = 50
 GAP_PAD_SEC = 0.25  # loopback sends nothing during silence; pad gaps larger than this
 MIX_RATE = 48000
 MIX_BLOCK_SEC = 10
+REPO = "crymetr/cryrec"
+UPDATE_EVERY = 3600  # seconds; unauthenticated GitHub API allows 60/hour per IP
+UPDATE_DIR = (APP_DIR / "updates") if PORTABLE else Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP / "updates"
+MUTEX_NAME = "CryRec-singleton-A38983BB-4076-4045-A6FA-5273C2036256"
 
 
 def load_config():
@@ -53,6 +60,135 @@ def save_config(cfg):
         CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     except Exception:
         pass
+
+
+class Updater:
+    """Auto-update from GitHub Releases (frozen builds only).
+
+    Checks on startup and hourly. A newer release is downloaded in the background,
+    then on_ready(version) fires once. apply() installs it: the installed build runs
+    the setup silently, the portable build swaps CryRec.exe in place. Every failure
+    is swallowed; an update check must never crash or block recording.
+    """
+
+    def __init__(self, on_ready):
+        self.on_ready = on_ready
+        self.version = None
+        self.path = None
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _ver(s):
+        parts = []
+        for p in str(s).lstrip("v").split("."):
+            try:
+                parts.append(int(p))
+            except ValueError:
+                break
+        return tuple(parts)
+
+    def check(self):
+        """Returns "newer", "latest", "busy", "dev" or "failed"."""
+        if not FROZEN:
+            return "dev"
+        if not self._lock.acquire(blocking=False):
+            return "busy"
+        try:
+            req = urllib.request.Request(
+                f"https://api.github.com/repos/{REPO}/releases/latest",
+                headers={"User-Agent": f"{APP}-updater", "Accept": "application/vnd.github+json"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                data = json.load(r)
+            tag = (data.get("tag_name") or "").lstrip("v")
+            if not tag or self._ver(tag) <= self._ver(VERSION):
+                return "latest"
+            if tag == self.version:
+                return "newer"
+            suffix = "-portable.zip" if PORTABLE else "-setup.exe"
+            asset = next((a for a in data.get("assets", [])
+                          if a["name"].lower().startswith("cryrec-") and a["name"].lower().endswith(suffix)), None)
+            if not asset:
+                return "latest"  # release still building
+            UPDATE_DIR.mkdir(parents=True, exist_ok=True)
+            dest = UPDATE_DIR / asset["name"]
+            if not (dest.exists() and dest.stat().st_size == asset.get("size")):
+                tmp = dest.with_name(dest.name + ".part")
+                dl = urllib.request.Request(asset["browser_download_url"], headers={"User-Agent": f"{APP}-updater"})
+                with urllib.request.urlopen(dl, timeout=120) as resp, open(tmp, "wb") as fh:
+                    while chunk := resp.read(1 << 16):
+                        fh.write(chunk)
+                os.replace(tmp, dest)
+            if PORTABLE:
+                with zipfile.ZipFile(dest) as z:
+                    member = next(n for n in z.namelist() if n.lower().endswith("cryrec.exe"))
+                    new_exe = UPDATE_DIR / f"CryRec-{tag}.exe"
+                    with z.open(member) as src, open(new_exe, "wb") as out:
+                        out.write(src.read())
+                dest = new_exe
+            self.version, self.path = tag, dest
+            self.on_ready(tag)
+            return "newer"
+        except Exception:
+            return "failed"
+        finally:
+            self._lock.release()
+
+    def start_background(self):
+        def loop():
+            while True:
+                self.check()
+                time.sleep(UPDATE_EVERY)
+        threading.Thread(target=loop, daemon=True).start()
+
+    def apply(self):
+        """Launch the new version. The caller must exit right after."""
+        env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetDllDirectoryW(None)  # don't leak PyInstaller's DLL path
+        except Exception:
+            pass
+        flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        if PORTABLE:
+            exe = Path(sys.executable)
+            old = exe.with_name("CryRec.old.exe")
+            old.unlink(missing_ok=True)
+            os.replace(exe, old)  # Windows allows renaming a running exe
+            try:
+                os.replace(self.path, exe)
+            except Exception:
+                os.replace(old, exe)
+                raise
+            subprocess.Popen([str(exe)], env=env, close_fds=True, creationflags=flags)
+        else:
+            log = UPDATE_DIR / "setup.log"
+            subprocess.Popen([str(self.path), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", f"/LOG={log}"],
+                             env=env, close_fds=True, creationflags=flags)
+
+
+def cleanup_old_update():
+    """Remove leftovers from a previous portable swap."""
+    if not (FROZEN and PORTABLE):
+        return
+    old = Path(sys.executable).with_name("CryRec.old.exe")
+
+    def run():
+        for _ in range(20):  # the old process may still be exiting
+            try:
+                old.unlink(missing_ok=True)
+                return
+            except Exception:
+                time.sleep(1)
+    threading.Thread(target=run, daemon=True).start()
+
+
+def hold_mutex():
+    """Named mutex the installer waits on, so it never replaces files while CryRec runs."""
+    try:
+        import ctypes
+        return ctypes.windll.kernel32.CreateMutexW(None, False, MUTEX_NAME)
+    except Exception:
+        return None
 
 
 class Track:
@@ -226,8 +362,52 @@ class App:
         ttk.Label(frm, textvariable=self.timer, font=("Segoe UI", 16, "bold")).grid(row=6, column=0, pady=(10, 0), sticky="w", padx=10)
         ttk.Label(frm, textvariable=self.status, wraplength=330).grid(row=6, column=1, columnspan=2, pady=(10, 0), sticky="w", padx=10)
 
+        ttk.Separator(frm).grid(row=7, column=0, columnspan=3, sticky="ew", pady=(10, 4))
+        self.upd_status = tk.StringVar(value="")
+        ttk.Label(frm, textvariable=self.upd_status, foreground="#666").grid(row=8, column=0, columnspan=2, sticky="w", padx=10)
+        self.upd_btn = ttk.Button(frm, text="Check for updates", command=self.update_clicked)
+        self.upd_btn.grid(row=8, column=2, sticky="e", padx=10)
+
+        self.updater = Updater(lambda v: root.after(0, lambda: self.update_ready(v)))
+        self.updater.start_background()
+
         self.load_devices()
         self.tick()
+
+    # ---------- updates ----------
+    def update_ready(self, version):
+        self.upd_status.set(f"Version {version} is ready to install.")
+        self.upd_btn.config(text=f"Install update {version}", state="normal")
+
+    def update_clicked(self):
+        if self.updater.path:
+            self.install_update()
+            return
+        self.upd_btn.config(state="disabled")
+        self.upd_status.set("Checking...")
+
+        def run():
+            res = self.updater.check()
+            msg = {"latest": f"You're on the latest version ({VERSION}).",
+                   "busy": "Already checking, one moment.",
+                   "dev": "Dev build: updates only work in the exe.",
+                   "newer": None}.get(res, "Couldn't reach GitHub. Try again later.")
+            if msg:
+                self.root.after(0, lambda: (self.upd_status.set(msg), self.upd_btn.config(state="normal")))
+        threading.Thread(target=run, daemon=True).start()
+
+    def install_update(self):
+        if self.recording or str(self.rec_btn["state"]) == "disabled":
+            messagebox.showinfo(APP, "Wait until the recording is stopped and saved, then install the update.")
+            return
+        try:
+            self.updater.apply()
+        except Exception as e:
+            messagebox.showerror(APP, f"Could not start the update:\n{e}")
+            return
+        self.pa.terminate()
+        self.root.destroy()
+        os._exit(0)  # the installer / new exe needs this process gone
 
     # ---------- devices ----------
     def load_devices(self):
@@ -492,6 +672,8 @@ def main():
     if len(sys.argv) > 2 and sys.argv[1] == "--selftest":
         selftest(sys.argv[2])
         return
+    _mutex = hold_mutex()  # noqa: F841  (kept alive for the process lifetime)
+    cleanup_old_update()
     root = tk.Tk()
     try:
         ttk.Style().theme_use("vista")

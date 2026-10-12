@@ -21,7 +21,9 @@ Remove-Item $zip -ErrorAction SilentlyContinue
 Compress-Archive -Path $stage -DestinationPath $zip
 
 # Installer
-$iscc = "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+$iscc = @("$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe", "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe") |
+    Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $iscc) { throw 'Inno Setup 6 not found' }
 $env:CRYREC_VERSION = $ver
 & $iscc /Q "$PSScriptRoot\cryrec.iss"
 if ($LASTEXITCODE) { throw 'Inno Setup failed' }
