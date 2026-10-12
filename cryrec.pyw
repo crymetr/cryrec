@@ -1,14 +1,14 @@
 """CryRec: record a chosen input (mic) and a chosen output (speaker loopback) together.
 
-Each source is written to its own WAV while recording. On stop, ffmpeg mixes them
-into one MP3. The separate tracks are kept as FLAC (me / them) for later transcripts.
+Each source is written to its own WAV while recording. On stop, the tracks are mixed
+into one MP3 and kept as FLAC (me / them) for later transcripts.
+
+Portable mode: if a file named "portable" sits next to the exe, settings live there too.
 """
 
 import json
 import os
 import queue
-import shutil
-import subprocess
 import sys
 import threading
 import time
@@ -18,17 +18,26 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+import lameenc
 import numpy as np
 import pyaudiowpatch as pyaudio
+import soundfile as sf
+import soxr
 
 APP = "CryRec"
-VERSION = "0.1.0"
-CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / APP
-CONFIG_FILE = CONFIG_DIR / "config.json"
-DEFAULT_OUT = Path.home() / "Documents" / "Recordings"
+VERSION = "0.1.1"
+FROZEN = getattr(sys, "frozen", False)
+APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
+RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
+PORTABLE = (APP_DIR / "portable").exists()
+CONFIG_DIR = APP_DIR if PORTABLE else Path(os.environ.get("APPDATA", Path.home())) / APP
+CONFIG_FILE = CONFIG_DIR / "cryrec.json"
+DEFAULT_OUT = (APP_DIR / "Recordings") if PORTABLE else Path.home() / "Documents" / "Recordings"
 NO_DEVICE = "(none)"
 CHUNK_MS = 50
 GAP_PAD_SEC = 0.25  # loopback sends nothing during silence; pad gaps larger than this
+MIX_RATE = 48000
+MIX_BLOCK_SEC = 10
 
 
 def load_config():
@@ -44,14 +53,6 @@ def save_config(cfg):
         CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     except Exception:
         pass
-
-
-def find_ffmpeg():
-    exe = shutil.which("ffmpeg")
-    if exe:
-        return exe
-    local = Path(__file__).with_name("ffmpeg.exe")
-    return str(local) if local.exists() else None
 
 
 class Track:
@@ -179,7 +180,11 @@ class App:
         self.t0 = None
         self.recording = False
 
-        root.title(f"{APP} v{VERSION}")
+        root.title(f"{APP} v{VERSION}" + (" (portable)" if PORTABLE else ""))
+        try:
+            root.iconbitmap(str(RES_DIR / "cryrec.ico"))
+        except tk.TclError:
+            pass
         root.resizable(False, False)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -388,30 +393,105 @@ def finalize(tracks, session_dir):
     wavs = [t.path for t in tracks if t.path.exists() and t.frames_written > 0]
     if not wavs:
         return "Nothing was recorded."
-    ffmpeg = find_ffmpeg()
-    if not ffmpeg:
-        return f"Saved WAV files (ffmpeg not found, no MP3): {session_dir}"
     mp3 = session_dir / "meeting.mp3"
-    no_window = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-    cmd = [ffmpeg, "-y", "-loglevel", "error"]
+    try:
+        mix_to_mp3(wavs, mp3)
+    except Exception as e:
+        return f"MP3 mix failed, WAV files kept: {e}"
     for w in wavs:
-        cmd += ["-i", str(w)]
-    if len(wavs) > 1:
-        cmd += ["-filter_complex", f"amix=inputs={len(wavs)}:duration=longest:normalize=0,alimiter=limit=0.95"]
-    cmd += ["-ac", "2", "-b:a", "128k", str(mp3)]
-    r = subprocess.run(cmd, capture_output=True, text=True, creationflags=no_window)
-    if r.returncode != 0:
-        return f"MP3 mix failed, WAV files kept: {r.stderr.strip()[:200]}"
-    for w in wavs:
-        flac = w.with_suffix(".flac")
-        r = subprocess.run([ffmpeg, "-y", "-loglevel", "error", "-i", str(w), str(flac)],
-                           capture_output=True, creationflags=no_window)
-        if r.returncode == 0 and flac.exists():
-            w.unlink()
+        try:
+            wav_to_flac(w)
+        except Exception:
+            pass  # WAV stays if FLAC fails
     return f"Saved {mp3}"
 
 
+def _read_block(wf, frames):
+    """Read up to `frames` from an open wave file as float32 stereo, or None at EOF."""
+    raw = wf.readframes(frames)
+    if not raw:
+        return None
+    x = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    x = x.reshape(-1, wf.getnchannels())
+    return np.repeat(x, 2, axis=1) if x.shape[1] == 1 else x[:, :2]
+
+
+def mix_to_mp3(wavs, mp3_path):
+    """Resample every track to MIX_RATE, sum them, and stream-encode one stereo MP3."""
+    files = [wave.open(str(w), "rb") for w in wavs]
+    try:
+        resamplers = [soxr.ResampleStream(f.getframerate(), MIX_RATE, 2, dtype="float32") for f in files]
+        bufs = [np.zeros((0, 2), dtype=np.float32) for _ in files]
+        done = [False] * len(files)
+        enc = lameenc.Encoder()
+        enc.set_bit_rate(128)
+        enc.set_in_sample_rate(MIX_RATE)
+        enc.set_channels(2)
+        enc.set_quality(2)
+        with open(mp3_path, "wb") as out:
+            while not all(done):
+                for i, f in enumerate(files):
+                    if done[i]:
+                        continue
+                    blk = _read_block(f, f.getframerate() * MIX_BLOCK_SEC)
+                    last = blk is None
+                    y = resamplers[i].resample_chunk(blk if blk is not None else np.zeros((0, 2), np.float32), last=last)
+                    bufs[i] = np.concatenate([bufs[i], y])
+                    done[i] = last
+                # mix what every live track has; finished tracks count as silence
+                n = min((len(b) for b, d in zip(bufs, done) if not d), default=max(len(b) for b in bufs))
+                if n == 0:
+                    continue
+                mixed = np.zeros((n, 2), dtype=np.float32)
+                for i in range(len(bufs)):
+                    part = bufs[i][:n]
+                    mixed[: len(part)] += part
+                    bufs[i] = bufs[i][n:]
+                pcm = (np.clip(mixed, -1.0, 1.0) * 32767).astype(np.int16)
+                out.write(enc.encode(pcm.tobytes()))
+            out.write(enc.flush())
+    finally:
+        for f in files:
+            f.close()
+
+
+def wav_to_flac(wav_path):
+    flac = wav_path.with_suffix(".flac")
+    with wave.open(str(wav_path), "rb") as wf, sf.SoundFile(
+        str(flac), "w", samplerate=wf.getframerate(), channels=wf.getnchannels(), subtype="PCM_16", format="FLAC"
+    ) as out:
+        block = wf.getframerate() * MIX_BLOCK_SEC
+        while True:
+            raw = wf.readframes(block)
+            if not raw:
+                break
+            out.write(np.frombuffer(raw, dtype=np.int16).reshape(-1, wf.getnchannels()))
+    wav_path.unlink()
+
+
+def selftest(out_dir):
+    """Record 3 s of speaker loopback headless and save it; result goes to selftest.txt."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        pa = pyaudio.PyAudio()
+        lb = pa.get_default_wasapi_loopback()
+        t = Track(pa, lb, out_dir / "them.wav", pad_gaps=True)
+        t.role = "spk"
+        t.start(time.monotonic())
+        time.sleep(3)
+        t.stop()
+        msg = finalize([t], out_dir)
+        pa.terminate()
+    except Exception as e:
+        msg = f"FAIL {e!r}"
+    (out_dir / "selftest.txt").write_text(msg, encoding="utf-8")
+
+
 def main():
+    if len(sys.argv) > 2 and sys.argv[1] == "--selftest":
+        selftest(sys.argv[2])
+        return
     root = tk.Tk()
     try:
         ttk.Style().theme_use("vista")

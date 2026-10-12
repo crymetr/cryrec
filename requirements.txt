@@ -1,2 +1,8 @@
 PyAudioWPatch>=0.2.12
 numpy
+lameenc
+soxr
+soundfile
+# build only
+pyinstaller
+pillow
