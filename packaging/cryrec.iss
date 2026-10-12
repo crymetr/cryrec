@@ -28,7 +28,11 @@ RestartApplications=no
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"
 
 [Files]
-Source: "..\dist\CryRec.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#GetEnv("CRYREC_APPDIR")}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+
+[InstallDelete]
+; clear the previous version's libraries so stale DLLs don't linger
+Type: filesandordirs; Name: "{app}\_internal"
 
 [Icons]
 Name: "{group}\CryRec"; Filename: "{app}\CryRec.exe"

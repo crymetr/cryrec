@@ -11,6 +11,18 @@ Two options, both from the Releases page or `dist\`:
 
 No Python or ffmpeg needed. The exe is unsigned, so Windows SmartScreen may warn on first run ("More info" > "Run anyway").
 
+## Transcripts
+
+After each recording CryRec writes `transcript.txt` (readable, with `[hh:mm:ss] Me:` / `Them:` lines) and `transcript.srt` into the same folder. Turn off "Transcribe after recording" to do it by hand with **Transcribe...** (works on any older recording folder too).
+
+- Runs on this computer with Whisper (faster-whisper, CPU). Audio never leaves the machine.
+- The speech model downloads once on first use: Turbo (best, 1.5 GB) or Small (faster, 0.5 GB).
+- Me / Them come from the separate mic and speaker tracks, so labels are always right. When the remote voice leaks from your speakers into your mic, those duplicate lines are removed.
+- Language: Auto, Turkish, English, or Mixed TR/EN (detects per sentence).
+- Speed on a laptop CPU: Turbo takes about 0.6x the meeting length, Small about 0.2x. You can keep recording while a transcript runs.
+
+`CryRec.exe --transcribe <folder>` does the same headless (result in `<folder>\transcript.log`).
+
 ## Updates
 
 The exe checks GitHub Releases on startup and every hour. A newer version is downloaded in the background and the bottom bar shows **Install update x.y.z**. One click installs it and restarts CryRec. The installed build runs the new setup silently; the portable build swaps `CryRec.exe` in place. It never updates during a recording. `CryRec.exe --update` does the same from the command line.
@@ -48,6 +60,6 @@ powershell -File packaging\build.ps1
 
 ## Roadmap
 
-- v0.1: record chosen input + output (this)
-- v0.2: local transcript with speaker labels
+- v0.1: record chosen input + output
+- v0.2: local transcript with Me / Them labels (this)
 - v0.3: dictation

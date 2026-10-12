@@ -3,6 +3,9 @@ numpy
 lameenc
 soxr
 soundfile
+faster-whisper>=1.2,<1.3
+# faster-whisper 1.2 passes metadata_errors to av.open; av 19 rejects it, 15.1 works
+av>=11,<16
 # build only
 pyinstaller
 pillow

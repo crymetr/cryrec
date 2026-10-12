@@ -27,8 +27,10 @@ import pyaudiowpatch as pyaudio
 import soundfile as sf
 import soxr
 
+import transcribe as tr
+
 APP = "CryRec"
-VERSION = "0.1.2"
+VERSION = "0.2.0"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -45,6 +47,7 @@ REPO = "crymetr/cryrec"
 UPDATE_EVERY = 3600  # seconds; unauthenticated GitHub API allows 60/hour per IP
 UPDATE_DIR = (APP_DIR / "updates") if PORTABLE else Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP / "updates"
 MUTEX_NAME = "CryRec-singleton-A38983BB-4076-4045-A6FA-5273C2036256"
+MODELS_DIR = (APP_DIR / "models") if PORTABLE else Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP / "models"
 
 
 def load_config():
@@ -362,11 +365,33 @@ class App:
         ttk.Label(frm, textvariable=self.timer, font=("Segoe UI", 16, "bold")).grid(row=6, column=0, pady=(10, 0), sticky="w", padx=10)
         ttk.Label(frm, textvariable=self.status, wraplength=330).grid(row=6, column=1, columnspan=2, pady=(10, 0), sticky="w", padx=10)
 
+        # transcript
         ttk.Separator(frm).grid(row=7, column=0, columnspan=3, sticky="ew", pady=(10, 4))
+        ttk.Label(frm, text="Transcript").grid(row=8, column=0, sticky="w", **pad)
+        opts = ttk.Frame(frm)
+        opts.grid(row=8, column=1, columnspan=2, sticky="w", padx=10)
+        self.model_labels = {v["label"]: k for k, v in tr.MODELS.items()}
+        self.model_var = tk.StringVar(value=tr.MODELS.get(self.cfg.get("model"), tr.MODELS["turbo"])["label"])
+        ttk.Combobox(opts, textvariable=self.model_var, values=list(self.model_labels), state="readonly", width=24).grid(row=0, column=0)
+        lang = self.cfg.get("language")
+        self.lang_var = tk.StringVar(value=lang if lang in tr.LANGUAGES else "Auto")
+        ttk.Combobox(opts, textvariable=self.lang_var, values=list(tr.LANGUAGES), state="readonly", width=14).grid(row=0, column=1, padx=(8, 0))
+        self.auto_var = tk.BooleanVar(value=self.cfg.get("auto_transcribe", True))
+        ttk.Checkbutton(frm, text="Transcribe after recording", variable=self.auto_var).grid(row=9, column=1, sticky="w", padx=10)
+        self.tr_btn = ttk.Button(frm, text="Transcribe...", command=self.transcribe_clicked)
+        self.tr_btn.grid(row=9, column=2, sticky="e", padx=10)
+        self.t_status = tk.StringVar(value="")
+        ttk.Label(frm, textvariable=self.t_status, foreground="#666", wraplength=430).grid(row=10, column=0, columnspan=3, sticky="w", padx=10)
+        self.t_queue = queue.Queue()
+        self.t_cancel = threading.Event()
+        self.t_busy = False
+        threading.Thread(target=self._transcribe_worker, daemon=True).start()
+
+        ttk.Separator(frm).grid(row=11, column=0, columnspan=3, sticky="ew", pady=(10, 4))
         self.upd_status = tk.StringVar(value="")
-        ttk.Label(frm, textvariable=self.upd_status, foreground="#666").grid(row=8, column=0, columnspan=2, sticky="w", padx=10)
+        ttk.Label(frm, textvariable=self.upd_status, foreground="#666").grid(row=12, column=0, columnspan=2, sticky="w", padx=10)
         self.upd_btn = ttk.Button(frm, text="Check for updates", command=self.update_clicked)
-        self.upd_btn.grid(row=8, column=2, sticky="e", padx=10)
+        self.upd_btn.grid(row=12, column=2, sticky="e", padx=10)
 
         self.updater = Updater(lambda v: root.after(0, lambda: self.update_ready(v)))
         self.updater.start_background()
@@ -400,6 +425,8 @@ class App:
         if self.recording or str(self.rec_btn["state"]) == "disabled":
             messagebox.showinfo(APP, "Wait until the recording is stopped and saved, then install the update.")
             return
+        if self.t_busy and not messagebox.askyesno(APP, "A transcript is running. Cancel it and install the update?"):
+            return
         try:
             self.updater.apply()
         except Exception as e:
@@ -408,6 +435,78 @@ class App:
         self.pa.terminate()
         self.root.destroy()
         os._exit(0)  # the installer / new exe needs this process gone
+
+    # ---------- transcripts ----------
+    def _transcript_settings(self):
+        model = self.model_labels.get(self.model_var.get(), "turbo")
+        self.cfg.update(model=model, language=self.lang_var.get(), auto_transcribe=self.auto_var.get())
+        save_config(self.cfg)
+        return model, self.lang_var.get()
+
+    def transcribe_clicked(self):
+        if self.t_busy:
+            self.t_cancel.set()
+            self.t_status.set("Cancelling...")
+            return
+        start = self.session_dir if self.session_dir and self.session_dir.exists() else Path(self.dir_var.get())
+        d = filedialog.askdirectory(initialdir=str(start), title="Pick a recording folder")
+        if d:
+            self.enqueue_transcript(Path(d))
+
+    def enqueue_transcript(self, session_dir):
+        """UI thread only: checks the model is there (asks to download once) and queues the job."""
+        model, language = self._transcript_settings()
+        if not tr.find_tracks(session_dir):
+            messagebox.showwarning(APP, f"No recording found in:\n{session_dir}")
+            return
+        if not tr.model_ready(MODELS_DIR, model):
+            info = tr.MODELS[model]
+            if not messagebox.askyesno(APP, f"Transcripts need the {info['label'].split(' (')[0]} speech model "
+                                            f"({info['size_gb']} GB, one-time download).\n\n"
+                                            "It runs on this computer. Audio never leaves it.\n\nDownload now?"):
+                self.t_status.set("Transcript skipped (no model).")
+                return
+        self.t_queue.put((session_dir, model, language))
+        if not self.t_busy:
+            self.t_status.set("Transcript queued...")
+
+    def _transcribe_worker(self):
+        loaded = {}
+        while True:
+            job = self.t_queue.get()
+            session_dir, model_name, language = job
+            self.t_cancel.clear()
+            self._t_ui(busy=True)
+
+            def progress(frac, text, name=session_dir.name):
+                self._t_ui(text=f"{name}: {text} ({frac * 100:.0f}%)")
+            try:
+                if not tr.model_ready(MODELS_DIR, model_name):
+                    tr.download_model(MODELS_DIR, model_name, progress, self.t_cancel.is_set)
+                if model_name not in loaded:
+                    loaded.clear()
+                    self._t_ui(text=f"{session_dir.name}: loading speech model...")
+                    loaded[model_name] = tr.load_model(MODELS_DIR, model_name)
+                out = tr.transcribe_session(session_dir, loaded[model_name], language, progress, self.t_cancel.is_set)
+                msg = f"Transcript saved: {out}"
+            except tr.Cancelled:
+                msg = "Transcript cancelled."
+                while not self.t_queue.empty():
+                    self.t_queue.get_nowait()
+            except Exception as e:
+                msg = f"Transcript failed: {e}"
+            if self.t_queue.empty():
+                loaded.clear()  # free ~1 GB of RAM until the next job
+            self._t_ui(busy=not self.t_queue.empty(), text=msg)
+
+    def _t_ui(self, busy=None, text=None):
+        def apply():
+            if busy is not None:
+                self.t_busy = busy
+                self.tr_btn.config(text="Cancel transcript" if busy else "Transcribe...")
+            if text is not None:
+                self.t_status.set(text)
+        self.root.after(0, apply)
 
     # ---------- devices ----------
     def load_devices(self):
@@ -533,7 +632,13 @@ class App:
         msg = finalize(tracks, session_dir)
         if errors:
             msg += "\nErrors: " + "; ".join(errors)
-        self.root.after(0, lambda: (self.status.set(msg), self.rec_btn.config(state="normal")))
+
+        def done():
+            self.status.set(msg)
+            self.rec_btn.config(state="normal")
+            if self.auto_var.get() and msg.startswith("Saved"):
+                self.enqueue_transcript(session_dir)
+        self.root.after(0, done)
 
     # ---------- ui ----------
     def tick(self):
@@ -561,6 +666,10 @@ class App:
     def on_close(self):
         if self.recording and not messagebox.askyesno(APP, "Recording is running. Stop and save before closing?"):
             return
+        if not self.recording and self.t_busy and not messagebox.askyesno(
+                APP, "A transcript is running. Close anyway? You can run it again later with Transcribe..."):
+            return
+        self.t_cancel.set()
         if self.recording:
             self._teardown()
             finalize(self.tracks, self.session_dir)
@@ -671,6 +780,20 @@ def selftest(out_dir):
 def main():
     if len(sys.argv) > 2 and sys.argv[1] == "--selftest":
         selftest(sys.argv[2])
+        return
+    if len(sys.argv) > 2 and sys.argv[1] == "--transcribe":
+        # headless: transcribe one recording folder with the saved model/language
+        cfg = load_config()
+        model = cfg.get("model", "turbo")
+        out = Path(sys.argv[2]) / "transcript.log"
+        try:
+            if not tr.model_ready(MODELS_DIR, model):
+                tr.download_model(MODELS_DIR, model, lambda f, t: None, lambda: False)
+            m = tr.load_model(MODELS_DIR, model)
+            res = f"OK {tr.transcribe_session(sys.argv[2], m, cfg.get('language', 'Auto'), lambda f, t: None, lambda: False)}"
+        except Exception as e:
+            res = f"FAIL {e!r}"
+        out.write_text(res, encoding="utf-8")
         return
     if len(sys.argv) > 1 and sys.argv[1] == "--update":
         # headless: install the newest release if there is one, then exit

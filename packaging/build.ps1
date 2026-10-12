@@ -5,10 +5,16 @@ $ver = (Select-String -Path "$root\cryrec.pyw" -Pattern '^VERSION = "(.+)"').Mat
 $work = Join-Path $env:TEMP 'cryrec-build'
 $dist = Join-Path $root 'dist'
 
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name CryRec `
-    --icon "$root\cryrec.ico" --add-data "$root\cryrec.ico;." `
-    --distpath $dist --workpath $work --specpath $work "$root\cryrec.pyw"
-if ($LASTEXITCODE) { throw 'PyInstaller failed' }
+$common = @('--noconfirm', '--clean', '--windowed', '--name', 'CryRec',
+    '--icon', "$root\cryrec.ico", '--add-data', "$root\cryrec.ico;.", '--paths', $root,
+    '--collect-data', 'faster_whisper', '--collect-binaries', 'ctranslate2', '--collect-binaries', 'onnxruntime',
+    '--workpath', $work, '--specpath', $work, "$root\cryrec.pyw")
+# Folder build for the installer: starts fast, nothing to unpack on launch
+python -m PyInstaller @common --onedir --distpath "$work\onedir"
+if ($LASTEXITCODE) { throw 'PyInstaller (onedir) failed' }
+# Single exe for portable: one file to carry and to swap on update
+python -m PyInstaller @common --onefile --distpath $dist
+if ($LASTEXITCODE) { throw 'PyInstaller (onefile) failed' }
 
 # Portable: exe + "portable" marker, settings and recordings stay next to the exe
 $stage = Join-Path $work 'portable\CryRec'
@@ -25,6 +31,7 @@ $iscc = @("$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe", "${env:ProgramFile
     Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $iscc) { throw 'Inno Setup 6 not found' }
 $env:CRYREC_VERSION = $ver
+$env:CRYREC_APPDIR = "$work\onedir\CryRec"
 & $iscc /Q "$PSScriptRoot\cryrec.iss"
 if ($LASTEXITCODE) { throw 'Inno Setup failed' }
 
