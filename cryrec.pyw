@@ -672,6 +672,12 @@ def main():
     if len(sys.argv) > 2 and sys.argv[1] == "--selftest":
         selftest(sys.argv[2])
         return
+    if len(sys.argv) > 1 and sys.argv[1] == "--update":
+        # headless: install the newest release if there is one, then exit
+        up = Updater(lambda v: None)
+        if up.check() == "newer" and up.path:
+            up.apply()
+        return
     _mutex = hold_mutex()  # noqa: F841  (kept alive for the process lifetime)
     cleanup_old_update()
     root = tk.Tk()

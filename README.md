@@ -11,6 +11,10 @@ Two options, both from the Releases page or `dist\`:
 
 No Python or ffmpeg needed. The exe is unsigned, so Windows SmartScreen may warn on first run ("More info" > "Run anyway").
 
+## Updates
+
+The exe checks GitHub Releases on startup and every hour. A newer version is downloaded in the background and the bottom bar shows **Install update x.y.z**. One click installs it and restarts CryRec. The installed build runs the new setup silently; the portable build swaps `CryRec.exe` in place. It never updates during a recording. `CryRec.exe --update` does the same from the command line.
+
 ## Output
 
 Each recording gets its own folder under the save location (installed: `Documents\Recordings`, portable: `Recordings\` next to the exe):
@@ -33,6 +37,12 @@ Build exe + portable zip + installer (needs PyInstaller and Inno Setup 6):
 ```
 powershell -File packaging\build.ps1
 ```
+
+### Releasing
+
+1. Bump `VERSION` in `cryrec.pyw` and commit.
+2. `git tag vX.Y.Z && git push origin main vX.Y.Z`
+3. GitHub Actions builds the installer and portable zip and attaches them to the release (it fails if the tag and `VERSION` differ). Running apps pick it up within an hour.
 
 `CryRec.exe --selftest <dir>` records 3 s of speaker audio headless and writes the result to `<dir>\selftest.txt`.
 
