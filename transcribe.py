@@ -6,9 +6,14 @@ remote voice leaking from the speakers into the mic are dropped.
 """
 
 import difflib
+import io
 import json
 import os
+import time
+import urllib.error
+import urllib.parse
 import urllib.request
+import zipfile
 from datetime import timedelta
 from pathlib import Path
 
@@ -99,7 +104,7 @@ def find_tracks(session_dir):
     """[(label, path)] for this recording. Falls back to meeting.mp3 as one track."""
     found = []
     for stem, label in TRACKS:
-        for ext in (".flac", ".wav"):
+        for ext in (".flac", ".wav", ".mp3"):
             p = session_dir / f"{stem}{ext}"
             if p.exists():
                 found.append((label, p))
@@ -109,28 +114,50 @@ def find_tracks(session_dir):
     return found
 
 
-def load_model(models_root, name):
-    from faster_whisper import WhisperModel
-    threads = max(1, (os.cpu_count() or 4) // 2)
-    return WhisperModel(str(model_dir(models_root, name)), device="cpu", compute_type="int8", cpu_threads=threads)
+def _add_cuda_dll_dirs():
+    """Make pip-installed CUDA libs (nvidia-cublas-cu12, nvidia-cudnn-cu12) findable on Windows."""
+    import site
+    try:
+        dirs = list(site.getsitepackages()) + [site.getusersitepackages()]
+    except AttributeError:  # frozen exe: no site-packages, rely on CUDA already being on PATH
+        return
+    roots = [Path(p) / "nvidia" for p in dirs]
+    for root in roots:
+        for bin_dir in root.glob("*/bin"):
+            try:
+                os.add_dll_directory(str(bin_dir))
+            except Exception:
+                pass
+            if str(bin_dir) not in os.environ.get("PATH", ""):
+                os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
 
 
-def transcribe_session(session_dir, model, language, progress, cancel):
-    """Write transcript.txt and transcript.srt into session_dir. Returns the txt path."""
-    session_dir = Path(session_dir)
-    tracks = find_tracks(session_dir)
-    if not tracks:
-        raise FileNotFoundError("No me/them tracks or meeting.mp3 in this folder.")
-    lang = LANGUAGES.get(language, language)
-    segments = []
-    total_dur = 0.0
-    for ti, (label, path) in enumerate(tracks):
-        audio = load_audio(path)
-        dur = len(audio) / SAMPLE_RATE
-        total_dur = max(total_dur, dur)
-        if dur < 0.5 or float(np.abs(audio).max(initial=0)) < 1e-3:
-            continue  # empty or silent track
-        segs, _info = model.transcribe(
+class LocalEngine:
+    """faster-whisper on this machine. device="auto" tries the GPU first and falls back to CPU."""
+
+    def __init__(self, models_root, name, device="auto"):
+        from faster_whisper import WhisperModel
+        path = str(model_dir(models_root, name))
+        self.device = "cpu"
+        self.model = None
+        if device in ("auto", "cuda"):
+            try:
+                import ctranslate2
+                if ctranslate2.get_cuda_device_count() > 0:
+                    _add_cuda_dll_dirs()
+                    m = WhisperModel(path, device="cuda", compute_type="int8_float16")
+                    list(m.transcribe(np.zeros(SAMPLE_RATE, np.float32), vad_filter=False)[0])  # fails here if cuBLAS/cuDNN are missing
+                    self.model, self.device = m, "gpu"
+            except Exception:
+                self.model = None
+            if self.model is None and device == "cuda":
+                raise RuntimeError("GPU requested but CUDA (cuBLAS 12 / cuDNN 9) is not usable.")
+        if self.model is None:
+            threads = max(1, (os.cpu_count() or 4) // 2)
+            self.model = WhisperModel(path, device="cpu", compute_type="int8", cpu_threads=threads)
+
+    def segments(self, audio, lang, on_progress, cancel):
+        segs, _info = self.model.transcribe(
             audio,
             language=None if lang in (None, "mixed") else lang,
             multilingual=lang == "mixed",
@@ -144,16 +171,166 @@ def transcribe_session(session_dir, model, language, progress, cancel):
         for s in segs:
             if cancel():
                 raise Cancelled()
-            text = s.text.strip()
+            on_progress(s.end)
+            yield s.start, s.end, s.text
+
+
+class ApiEngine:
+    """Any OpenAI-compatible /audio/transcriptions endpoint (Groq, OpenAI, a local server...)."""
+
+    CHUNK_SEC = 600  # keeps each upload far below the usual 25 MB limit
+
+    def __init__(self, base_url, key, model):
+        self.base_url = base_url.rstrip("/")
+        self.key = key
+        self.model = model
+        self.device = "api"
+
+    def segments(self, audio, lang, on_progress, cancel):
+        step = self.CHUNK_SEC * SAMPLE_RATE
+        for off in range(0, len(audio), step):
+            if cancel():
+                raise Cancelled()
+            chunk = audio[off:off + step]
+            if float(np.abs(chunk).max(initial=0)) < 1e-3:
+                continue
+            fields = {"model": self.model, "response_format": "verbose_json", "timestamp_granularities[]": "segment"}
+            if lang in ("tr", "en"):
+                fields["language"] = lang
+            data = self._post(fields, encode_mp3(chunk, 64))  # 10 min at 64 kbps is ~5 MB
+            t0 = off / SAMPLE_RATE
+            segs = data.get("segments") or []
+            if not segs and data.get("text"):
+                segs = [{"start": 0, "end": len(chunk) / SAMPLE_RATE, "text": data["text"]}]
+            for s in segs:
+                yield t0 + s["start"], t0 + s["end"], s["text"]
+            on_progress(t0 + len(chunk) / SAMPLE_RATE)
+
+    def _post(self, fields, mp3):
+        boundary = "----cryrec" + os.urandom(8).hex()
+        body = b""
+        for k, v in fields.items():
+            body += f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
+        body += (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="audio.mp3"\r\n'
+                 "Content-Type: audio/mpeg\r\n\r\n").encode() + mp3 + f"\r\n--{boundary}--\r\n".encode()
+        req = urllib.request.Request(f"{self.base_url}/audio/transcriptions", data=body, method="POST", headers={
+            "Authorization": f"Bearer {self.key}", "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "User-Agent": "CryRec"})
+        try:
+            with urllib.request.urlopen(req, timeout=300) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(f"API error {e.code}: {e.read()[:300].decode(errors='replace')}") from None
+
+
+def encode_mp3(audio, kbps=32):
+    """16 kHz mono float32 -> small MP3 bytes (plenty for speech recognition)."""
+    import lameenc
+    enc = lameenc.Encoder()
+    enc.set_bit_rate(kbps)
+    enc.set_in_sample_rate(SAMPLE_RATE)
+    enc.set_channels(1)
+    enc.set_quality(2)
+    pcm = (np.clip(audio, -1, 1) * 32767).astype(np.int16).tobytes()
+    return bytes(enc.encode(pcm) + enc.flush())
+
+
+def transcribe_session(session_dir, engine, language, progress, cancel):
+    """Write transcript.txt and transcript.srt into session_dir. Returns the txt path."""
+    session_dir = Path(session_dir)
+    tracks = find_tracks(session_dir)
+    if not tracks:
+        raise FileNotFoundError("No me/them tracks or meeting.mp3 in this folder.")
+    lang = LANGUAGES.get(language, language)
+    segments = []
+    total_dur = 0.0
+    where = {"gpu": " on GPU", "cpu": "", "api": " via API"}.get(getattr(engine, "device", ""), "")
+    for ti, (label, path) in enumerate(tracks):
+        audio = load_audio(path)
+        dur = len(audio) / SAMPLE_RATE
+        total_dur = max(total_dur, dur)
+        if dur < 0.5 or float(np.abs(audio).max(initial=0)) < 1e-3:
+            continue  # empty or silent track
+
+        def on_progress(t, ti=ti, label=label, dur=dur):
+            progress((ti + min(1.0, t / dur)) / len(tracks), f"Transcribing {label}{where} {fmt_ts(t)} / {fmt_ts(dur)}")
+        for start, end, text in engine.segments(audio, lang, on_progress, cancel):
+            text = text.strip()
             if text:
-                segments.append({"start": s.start, "end": s.end, "who": label, "text": text})
-            progress((ti + min(1.0, s.end / dur)) / len(tracks), f"Transcribing {label} {fmt_ts(s.end)} / {fmt_ts(dur)}")
+                segments.append({"start": start, "end": end, "who": label, "text": text})
     segments = drop_bleed(segments)
     segments.sort(key=lambda s: (s["start"], s["who"]))
     txt = session_dir / "transcript.txt"
     txt.write_text(render_txt(session_dir, segments, total_dur, [l for l, _ in tracks]), encoding="utf-8")
     (session_dir / "transcript.srt").write_text(render_srt(segments), encoding="utf-8")
     return txt
+
+
+MAX_UPLOAD = 95 * 1024 * 1024  # Cloudflare and most proxies cap a request at 100 MB
+
+
+def remote_transcribe(session_dir, url, key, language, progress, cancel):
+    """Send the tracks to a CryRec server (see server/) and save the transcript it returns."""
+    session_dir = Path(session_dir)
+    tracks = find_tracks(session_dir)
+    if not tracks:
+        raise FileNotFoundError("No me/them tracks or meeting.mp3 in this folder.")
+    url = url.rstrip("/")
+    progress(0.0, "Preparing audio for the server...")
+    audios = [(label, load_audio(path)) for label, path in tracks]
+    total_sec = sum(len(a) for _, a in audios) / SAMPLE_RATE or 1
+    # best quality that still fits one upload: 64 kbps, lower only for very long meetings
+    kbps = max(16, min(64, int(MAX_UPLOAD * 0.95 * 8 / total_sec / 1000) // 8 * 8))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as z:
+        for label, audio in audios:
+            stem = {"Me": "me", "Them": "them"}.get(label, "meeting")
+            z.writestr(f"{stem}.mp3", encode_mp3(audio, kbps))
+            if cancel():
+                raise Cancelled()
+    del audios
+    body = buf.getvalue()
+    if len(body) > MAX_UPLOAD:
+        raise RuntimeError(f"Recording is too long to upload ({len(body) / 1e6:.0f} MB > 95 MB).")
+    q = urllib.parse.urlencode({"language": language, "name": session_dir.name})
+    job = _server_call(f"{url}/jobs?{q}", key, data=body, content_type="application/zip")
+    job_id = job["id"]
+    try:
+        while True:
+            if cancel():
+                raise Cancelled()
+            st = _server_call(f"{url}/jobs/{job_id}", key)
+            if st["status"] == "done":
+                (session_dir / "transcript.txt").write_text(st["txt"], encoding="utf-8")
+                (session_dir / "transcript.srt").write_text(st["srt"], encoding="utf-8")
+                return session_dir / "transcript.txt"
+            if st["status"] == "failed":
+                raise RuntimeError(f"Server: {st.get('error')}")
+            progress(st.get("progress", 0.0), "Server: " + (st.get("text") or st["status"]))
+            time.sleep(2)
+    except Cancelled:
+        try:
+            _server_call(f"{url}/jobs/{job_id}", key, method="DELETE")
+        except Exception:
+            pass
+        raise
+
+
+def server_health(url, key):
+    return _server_call(url.rstrip("/") + "/health", key)
+
+
+def _server_call(url, key, data=None, content_type=None, method=None):
+    headers = {"Authorization": f"Bearer {key}", "User-Agent": "CryRec"}
+    if content_type:
+        headers["Content-Type"] = content_type
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        msg = e.read()[:300].decode(errors="replace")
+        raise RuntimeError({401: "Server rejected the key.", 404: "Job not found on server."}.get(e.code, f"Server error {e.code}: {msg}")) from None
 
 
 def drop_bleed(segments):

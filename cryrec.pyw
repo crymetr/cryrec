@@ -30,7 +30,7 @@ import soxr
 import transcribe as tr
 
 APP = "CryRec"
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -48,6 +48,9 @@ UPDATE_EVERY = 3600  # seconds; unauthenticated GitHub API allows 60/hour per IP
 UPDATE_DIR = (APP_DIR / "updates") if PORTABLE else Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP / "updates"
 MUTEX_NAME = "CryRec-singleton-A38983BB-4076-4045-A6FA-5273C2036256"
 MODELS_DIR = (APP_DIR / "models") if PORTABLE else Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP / "models"
+ENGINES = {"local": "This PC", "server": "My server", "api": "Online API"}
+DEFAULT_API_URL = "https://api.groq.com/openai/v1"
+DEFAULT_API_MODEL = "whisper-large-v3-turbo"
 
 
 def load_config():
@@ -307,6 +310,148 @@ class KeepAlive:
                 pass
 
 
+def _dpapi(data, protect):
+    """Encrypt/decrypt bytes for the current Windows user (keys never sit in the config as plain text)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class Blob(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+    buf = ctypes.create_string_buffer(data, len(data))
+    inp = Blob(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+    out = Blob()
+    fn = ctypes.windll.crypt32.CryptProtectData if protect else ctypes.windll.crypt32.CryptUnprotectData
+    if not fn(ctypes.byref(inp), None, None, None, None, 0, ctypes.byref(out)):
+        raise OSError("DPAPI failed")
+    try:
+        return ctypes.string_at(out.pbData, out.cbData)
+    finally:
+        ctypes.windll.kernel32.LocalFree(ctypes.cast(out.pbData, ctypes.c_void_p))
+
+
+def secret_get(cfg, name):
+    import base64
+    try:
+        return _dpapi(base64.b64decode(cfg.get(name + "_enc", "")), False).decode()
+    except Exception:
+        return ""  # missing, or encrypted by another user/PC (portable moved): ask again
+
+
+def secret_set(cfg, name, value):
+    import base64
+    if value:
+        cfg[name + "_enc"] = base64.b64encode(_dpapi(value.encode(), True)).decode()
+    else:
+        cfg.pop(name + "_enc", None)
+
+
+def run_transcript(cfg, session_dir, progress, cancel, cache):
+    """Transcribe one recording folder with the engine chosen in cfg. cache keeps a loaded local model."""
+    engine, language = cfg.get("engine", "local"), cfg.get("language", "Auto")
+    if engine == "server":
+        return tr.remote_transcribe(session_dir, cfg.get("server_url", ""), secret_get(cfg, "server_key"),
+                                    language, progress, cancel)
+    if engine == "api":
+        eng = tr.ApiEngine(cfg.get("api_url") or DEFAULT_API_URL, secret_get(cfg, "api_key"),
+                           cfg.get("api_model") or DEFAULT_API_MODEL)
+        return tr.transcribe_session(session_dir, eng, language, progress, cancel)
+    model = cfg.get("model", "turbo")
+    device = "auto" if cfg.get("use_gpu", True) else "cpu"
+    if not tr.model_ready(MODELS_DIR, model):
+        tr.download_model(MODELS_DIR, model, progress, cancel)
+    if (model, device) not in cache:
+        cache.clear()
+        progress(0.0, "loading speech model...")
+        cache[(model, device)] = tr.LocalEngine(MODELS_DIR, model, device)
+    return tr.transcribe_session(session_dir, cache[(model, device)], language, progress, cancel)
+
+
+class SettingsDialog:
+    """Where transcripts are made: GPU use for This PC, your own server, or an online API."""
+
+    def __init__(self, parent, cfg):
+        self.cfg = cfg
+        w = self.win = tk.Toplevel(parent)
+        w.title(f"{APP} settings")
+        w.resizable(False, False)
+        w.transient(parent)
+        w.grab_set()
+        f = ttk.Frame(w, padding=12)
+        f.grid()
+        pad = {"padx": 6, "pady": 3}
+
+        ttk.Label(f, text="This PC", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
+        self.gpu = tk.BooleanVar(value=cfg.get("use_gpu", True))
+        ttk.Checkbutton(f, text="Use the NVIDIA GPU when CUDA is available (falls back to CPU)",
+                        variable=self.gpu).grid(row=1, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Label(f, text="My server", font=("Segoe UI", 10, "bold")).grid(row=2, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ttk.Label(f, text="A CryRec server you run yourself (see server/ in the repo).", foreground="#666").grid(row=3, column=0, columnspan=3, sticky="w", padx=6)
+        self.s_url = self._row(f, 4, "Address", cfg.get("server_url", ""), "https://...")
+        self.s_key = self._row(f, 5, "Key", secret_get(cfg, "server_key"), show="•")
+        self.s_res = tk.StringVar()
+        ttk.Button(f, text="Test", command=self.test_server).grid(row=6, column=2, sticky="e", **pad)
+        ttk.Label(f, textvariable=self.s_res, foreground="#666").grid(row=6, column=0, columnspan=2, sticky="w", padx=6)
+
+        ttk.Label(f, text="Online API", font=("Segoe UI", 10, "bold")).grid(row=7, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ttk.Label(f, text="Any OpenAI-compatible Whisper API. Audio is sent to that company.", foreground="#666").grid(row=8, column=0, columnspan=3, sticky="w", padx=6)
+        self.a_url = self._row(f, 9, "Base URL", cfg.get("api_url") or DEFAULT_API_URL)
+        self.a_key = self._row(f, 10, "API key", secret_get(cfg, "api_key"), show="•")
+        self.a_model = self._row(f, 11, "Model", cfg.get("api_model") or DEFAULT_API_MODEL)
+        self.a_res = tk.StringVar()
+        ttk.Button(f, text="Test", command=self.test_api).grid(row=12, column=2, sticky="e", **pad)
+        ttk.Label(f, textvariable=self.a_res, foreground="#666").grid(row=12, column=0, columnspan=2, sticky="w", padx=6)
+
+        b = ttk.Frame(f)
+        b.grid(row=13, column=0, columnspan=3, sticky="e", pady=(12, 0))
+        ttk.Button(b, text="Save", command=self.save).grid(row=0, column=0, padx=4)
+        ttk.Button(b, text="Cancel", command=w.destroy).grid(row=0, column=1)
+
+    def _row(self, f, r, label, value, hint=None, show=None):
+        ttk.Label(f, text=label).grid(row=r, column=0, sticky="w", padx=6, pady=3)
+        var = tk.StringVar(value=value)
+        ttk.Entry(f, textvariable=var, width=46, show=show or "").grid(row=r, column=1, columnspan=2, sticky="w", padx=6, pady=3)
+        return var
+
+    def _bg(self, fn, out):
+        out.set("Testing...")
+
+        def run():
+            try:
+                msg = fn()
+            except Exception as e:
+                msg = f"Failed: {e}"
+            self.win.after(0, lambda: out.set(msg[:70]))
+        threading.Thread(target=run, daemon=True).start()
+
+    def test_server(self):
+        url, key = self.s_url.get().strip(), self.s_key.get().strip()
+
+        def fn():
+            h = tr.server_health(url, key)
+            return f"OK, server {h.get('version')}, model {h.get('model')}"
+        self._bg(fn, self.s_res)
+
+    def test_api(self):
+        url, key = self.a_url.get().strip().rstrip("/"), self.a_key.get().strip()
+
+        def fn():
+            req = urllib.request.Request(f"{url}/models", headers={"Authorization": f"Bearer {key}", "User-Agent": APP})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                ids = [m.get("id") for m in json.load(r).get("data", [])]
+            want = self.a_model.get().strip()
+            return "OK, model found" if want in ids else f"Key OK, but model '{want}' not listed"
+        self._bg(fn, self.a_res)
+
+    def save(self):
+        self.cfg.update(use_gpu=self.gpu.get(), server_url=self.s_url.get().strip(),
+                        api_url=self.a_url.get().strip(), api_model=self.a_model.get().strip())
+        secret_set(self.cfg, "server_key", self.s_key.get().strip())
+        secret_set(self.cfg, "api_key", self.a_key.get().strip())
+        save_config(self.cfg)
+        self.win.destroy()
+
+
 class App:
     def __init__(self, root):
         self.root = root
@@ -370,16 +515,25 @@ class App:
         ttk.Label(frm, text="Transcript").grid(row=8, column=0, sticky="w", **pad)
         opts = ttk.Frame(frm)
         opts.grid(row=8, column=1, columnspan=2, sticky="w", padx=10)
+        self.engine_var = tk.StringVar(value=ENGINES.get(self.cfg.get("engine"), ENGINES["local"]))
+        eng_box = ttk.Combobox(opts, textvariable=self.engine_var, values=list(ENGINES.values()), state="readonly", width=12)
+        eng_box.grid(row=0, column=0)
+        eng_box.bind("<<ComboboxSelected>>", lambda e: self._engine_changed())
         self.model_labels = {v["label"]: k for k, v in tr.MODELS.items()}
         self.model_var = tk.StringVar(value=tr.MODELS.get(self.cfg.get("model"), tr.MODELS["turbo"])["label"])
-        ttk.Combobox(opts, textvariable=self.model_var, values=list(self.model_labels), state="readonly", width=24).grid(row=0, column=0)
+        self.model_box = ttk.Combobox(opts, textvariable=self.model_var, values=list(self.model_labels), state="readonly", width=22)
+        self.model_box.grid(row=0, column=1, padx=(6, 0))
         lang = self.cfg.get("language")
         self.lang_var = tk.StringVar(value=lang if lang in tr.LANGUAGES else "Auto")
-        ttk.Combobox(opts, textvariable=self.lang_var, values=list(tr.LANGUAGES), state="readonly", width=14).grid(row=0, column=1, padx=(8, 0))
+        ttk.Combobox(opts, textvariable=self.lang_var, values=list(tr.LANGUAGES), state="readonly", width=12).grid(row=0, column=2, padx=(6, 0))
         self.auto_var = tk.BooleanVar(value=self.cfg.get("auto_transcribe", True))
         ttk.Checkbutton(frm, text="Transcribe after recording", variable=self.auto_var).grid(row=9, column=1, sticky="w", padx=10)
-        self.tr_btn = ttk.Button(frm, text="Transcribe...", command=self.transcribe_clicked)
-        self.tr_btn.grid(row=9, column=2, sticky="e", padx=10)
+        tbtns = ttk.Frame(frm)
+        tbtns.grid(row=9, column=2, sticky="e", padx=10)
+        ttk.Button(tbtns, text="Settings", command=self.open_settings).grid(row=0, column=0, padx=(0, 6))
+        self.tr_btn = ttk.Button(tbtns, text="Transcribe...", command=self.transcribe_clicked)
+        self.tr_btn.grid(row=0, column=1)
+        self._engine_changed()
         self.t_status = tk.StringVar(value="")
         ttk.Label(frm, textvariable=self.t_status, foreground="#666", wraplength=430).grid(row=10, column=0, columnspan=3, sticky="w", padx=10)
         self.t_queue = queue.Queue()
@@ -437,11 +591,21 @@ class App:
         os._exit(0)  # the installer / new exe needs this process gone
 
     # ---------- transcripts ----------
+    def _engine(self):
+        return next((k for k, v in ENGINES.items() if v == self.engine_var.get()), "local")
+
+    def _engine_changed(self):
+        self.model_box.config(state="readonly" if self._engine() == "local" else "disabled")
+
     def _transcript_settings(self):
         model = self.model_labels.get(self.model_var.get(), "turbo")
-        self.cfg.update(model=model, language=self.lang_var.get(), auto_transcribe=self.auto_var.get())
+        self.cfg.update(engine=self._engine(), model=model, language=self.lang_var.get(),
+                        auto_transcribe=self.auto_var.get())
         save_config(self.cfg)
-        return model, self.lang_var.get()
+        return dict(self.cfg)
+
+    def open_settings(self):
+        SettingsDialog(self.root, self.cfg)
 
     def transcribe_clicked(self):
         if self.t_busy:
@@ -455,39 +619,39 @@ class App:
 
     def enqueue_transcript(self, session_dir):
         """UI thread only: checks the model is there (asks to download once) and queues the job."""
-        model, language = self._transcript_settings()
+        cfg = self._transcript_settings()
         if not tr.find_tracks(session_dir):
             messagebox.showwarning(APP, f"No recording found in:\n{session_dir}")
             return
-        if not tr.model_ready(MODELS_DIR, model):
+        engine, model = cfg["engine"], cfg["model"]
+        if engine == "local" and not tr.model_ready(MODELS_DIR, model):
             info = tr.MODELS[model]
             if not messagebox.askyesno(APP, f"Transcripts need the {info['label'].split(' (')[0]} speech model "
                                             f"({info['size_gb']} GB, one-time download).\n\n"
                                             "It runs on this computer. Audio never leaves it.\n\nDownload now?"):
                 self.t_status.set("Transcript skipped (no model).")
                 return
-        self.t_queue.put((session_dir, model, language))
+        if engine == "server" and not (cfg.get("server_url") and secret_get(cfg, "server_key")):
+            messagebox.showinfo(APP, "Set your server address and key in Settings first.")
+            return
+        if engine == "api" and not secret_get(cfg, "api_key"):
+            messagebox.showinfo(APP, "Set your API key in Settings first.")
+            return
+        self.t_queue.put((session_dir, cfg))
         if not self.t_busy:
             self.t_status.set("Transcript queued...")
 
     def _transcribe_worker(self):
         loaded = {}
         while True:
-            job = self.t_queue.get()
-            session_dir, model_name, language = job
+            session_dir, cfg = self.t_queue.get()
             self.t_cancel.clear()
             self._t_ui(busy=True)
 
             def progress(frac, text, name=session_dir.name):
                 self._t_ui(text=f"{name}: {text} ({frac * 100:.0f}%)")
             try:
-                if not tr.model_ready(MODELS_DIR, model_name):
-                    tr.download_model(MODELS_DIR, model_name, progress, self.t_cancel.is_set)
-                if model_name not in loaded:
-                    loaded.clear()
-                    self._t_ui(text=f"{session_dir.name}: loading speech model...")
-                    loaded[model_name] = tr.load_model(MODELS_DIR, model_name)
-                out = tr.transcribe_session(session_dir, loaded[model_name], language, progress, self.t_cancel.is_set)
+                out = run_transcript(cfg, session_dir, progress, self.t_cancel.is_set, loaded)
                 msg = f"Transcript saved: {out}"
             except tr.Cancelled:
                 msg = "Transcript cancelled."
@@ -784,13 +948,9 @@ def main():
     if len(sys.argv) > 2 and sys.argv[1] == "--transcribe":
         # headless: transcribe one recording folder with the saved model/language
         cfg = load_config()
-        model = cfg.get("model", "turbo")
         out = Path(sys.argv[2]) / "transcript.log"
         try:
-            if not tr.model_ready(MODELS_DIR, model):
-                tr.download_model(MODELS_DIR, model, lambda f, t: None, lambda: False)
-            m = tr.load_model(MODELS_DIR, model)
-            res = f"OK {tr.transcribe_session(sys.argv[2], m, cfg.get('language', 'Auto'), lambda f, t: None, lambda: False)}"
+            res = f"OK {run_transcript(cfg, Path(sys.argv[2]), lambda f, t: None, lambda: False, {})}"
         except Exception as e:
             res = f"FAIL {e!r}"
         out.write_text(res, encoding="utf-8")
