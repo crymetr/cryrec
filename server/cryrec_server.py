@@ -10,7 +10,8 @@ device (auto|cuda|cpu), models_dir, jobs_dir, keep_hours, log_file.
 API (all need "Authorization: Bearer <key>"):
     GET    /health            {ok, version, model, device}
     POST   /jobs?language=&name=   body = zip with me.mp3 / them.mp3 (or meeting.mp3) -> {id}
-    GET    /jobs/<id>         {status: queued|running|done|failed, progress, text, txt, srt, error}
+    POST   /notes?backend=local|claude&language=&my_name=   body = transcript text -> {id}
+    GET    /jobs/<id>         {status: queued|running|done|failed, progress, text, txt, srt | md, error}
     DELETE /jobs/<id>         cancel
 Audio is deleted as soon as a job finishes; transcripts are kept keep_hours for the client to fetch.
 """
@@ -35,9 +36,10 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import summarize as sm  # noqa: E402
 import transcribe as tr  # noqa: E402
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 APPDATA = Path(os.environ.get("APPDATA", Path.home())) / "CryRec"
 LOCALAPPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "CryRec"
 DEFAULTS = {
@@ -49,7 +51,14 @@ DEFAULTS = {
     "models_dir": str(LOCALAPPDATA / "models"),
     "jobs_dir": str(LOCALAPPDATA / "server-jobs"),
     "keep_hours": 24,
+    # meeting notes: "local" = Ollama on this machine, "claude" = Anthropic API (needs a key)
+    "ollama_url": sm.DEFAULT_OLLAMA_URL,
+    "ollama_model": sm.DEFAULT_OLLAMA_MODEL,
+    "ollama_ctx": 8192,
+    "anthropic_api_key": "",
+    "claude_model": sm.DEFAULT_CLAUDE_MODEL,
 }
+MAX_NOTES_BODY = 5 * 1024 * 1024
 MAX_BODY = 300 * 1024 * 1024
 TRACK_NAME = re.compile(r"^(me|them|meeting)\.(mp3|flac|wav|ogg|opus|m4a)$")
 
@@ -103,9 +112,32 @@ class Jobs:
         log(f"job {job_id[:8]} queued ({safe}, {sum((d / n).stat().st_size for n in names) / 1e6:.1f} MB)")
         return job_id
 
+    def add_notes(self, transcript, backend, language, my_name):
+        if backend not in ("local", "claude"):
+            raise ValueError("backend must be local or claude")
+        if backend == "claude" and not self.cfg.get("anthropic_api_key"):
+            raise ValueError("this server has no Anthropic API key")
+        job_id = uuid.uuid4().hex
+        job = {"id": job_id, "kind": "notes", "transcript": transcript, "backend": backend, "language": language,
+               "my_name": my_name, "status": "queued", "progress": 0.0, "text": "waiting",
+               "created": time.time(), "cancel": threading.Event()}
+        with self.lock:
+            self.jobs[job_id] = job
+        self.q.put(job_id)
+        log(f"notes {job_id[:8]} queued ({backend}, {len(transcript) / 1000:.0f}k chars)")
+        return job_id
+
     def get(self, job_id):
         with self.lock:
             return self.jobs.get(job_id)
+
+    def _run_notes(self, job):
+        if job["backend"] == "local":
+            eng = sm.OllamaNotes(self.cfg["ollama_url"], self.cfg["ollama_model"], int(self.cfg["ollama_ctx"]))
+        else:
+            eng = sm.ClaudeNotes(self.cfg["anthropic_api_key"], self.cfg["claude_model"])
+        job["md"] = eng.notes(job.pop("transcript"), job["my_name"], job["language"],
+                              lambda f, t: job.update(progress=f, text=t), job["cancel"].is_set)
 
     def _worker(self):
         engine = None
@@ -114,8 +146,25 @@ class Jobs:
             job = self.get(job_id)
             if not job or job["cancel"].is_set():
                 continue
-            job["status"], job["text"] = "running", "loading speech model"
             t0 = time.time()
+            if job.get("kind") == "notes":
+                job["status"], job["text"] = "running", "writing notes"
+                if job["backend"] == "local" and engine is not None:
+                    engine = None  # free Whisper's GPU memory for the local LLM
+                    self.device = "idle"
+                    gc.collect()
+                try:
+                    self._run_notes(job)
+                    job["status"], job["progress"] = "done", 1.0
+                    log(f"notes {job_id[:8]} done in {time.time() - t0:.0f}s ({job['backend']})")
+                except (tr.Cancelled, sm.Cancelled):
+                    job["status"], job["error"] = "failed", "cancelled"
+                except Exception as e:
+                    job["status"], job["error"] = "failed", str(e)
+                    log(f"notes {job_id[:8]} failed: {e!r}")
+                job.pop("transcript", None)
+                continue
+            job["status"], job["text"] = "running", "loading speech model"
             try:
                 if not tr.model_ready(self.cfg["models_dir"], self.cfg["model"]):
                     tr.download_model(self.cfg["models_dir"], self.cfg["model"],
@@ -184,26 +233,42 @@ def make_handler(cfg, jobs):
                 return
             path = urlparse(self.path).path
             if path == "/health":
-                return self._send(200, {"ok": True, "version": VERSION, "model": cfg["model"], "device": jobs.device})
+                return self._send(200, {"ok": True, "version": VERSION, "model": cfg["model"], "device": jobs.device,
+                                        "notes": {"local": bool(cfg.get("ollama_url")),
+                                                  "claude": bool(cfg.get("anthropic_api_key"))}})
             job = jobs.get(self._job_id() or "")
             if not job:
                 return self._send(404, {"error": "not found"})
             out = {k: job.get(k) for k in ("id", "status", "progress", "text", "error")}
             if job["status"] == "done":
-                out.update(txt=job["txt"], srt=job["srt"])
+                if job.get("kind") == "notes":
+                    out["md"] = job["md"]
+                else:
+                    out.update(txt=job["txt"], srt=job["srt"])
             self._send(200, out)
 
         def do_POST(self):
             if not self._authed():
                 return
             u = urlparse(self.path)
+            q = parse_qs(u.query)
+            if u.path == "/notes":
+                n = int(self.headers.get("Content-Length") or 0)
+                if not 0 < n <= MAX_NOTES_BODY:
+                    return self._send(413, {"error": "body missing or too large"})
+                text = self.rfile.read(n).decode("utf-8", errors="replace")
+                try:
+                    job_id = jobs.add_notes(text, q.get("backend", ["local"])[0], q.get("language", ["English"])[0] or None,
+                                            q.get("my_name", [""])[0])
+                except ValueError as e:
+                    return self._send(400, {"error": str(e)})
+                return self._send(200, {"id": job_id})
             if u.path != "/jobs":
                 return self._send(404, {"error": "not found"})
             n = int(self.headers.get("Content-Length") or 0)
             if not 0 < n <= MAX_BODY:
                 return self._send(413, {"error": "body missing or too large"})
             body = self.rfile.read(n)
-            q = parse_qs(u.query)
             try:
                 job_id = jobs.add(body, q.get("language", ["Auto"])[0], q.get("name", ["meeting"])[0])
             except (ValueError, zipfile.BadZipFile) as e:

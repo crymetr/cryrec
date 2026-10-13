@@ -32,6 +32,21 @@ Keys are stored encrypted for your Windows user (DPAPI), not as plain text.
 
 `CryRec.exe --transcribe <folder>` does the same headless (result in `<folder>\transcript.log`).
 
+## Meeting notes
+
+With a notes engine picked next to "Notes", CryRec also writes `notes.md` after the transcript: **Summary**, **Decisions**, **Action items** (`- [ ] Owner: task`) and **Open questions**. **Notes...** writes (or rewrites) notes for any folder that already has a transcript, so you can pick a different engine per meeting.
+
+| Notes engine | What it does |
+|---|---|
+| **Claude** | Anthropic API with your key (default model `claude-opus-5-5`, change it in Settings). Whole meeting in one request. |
+| **OpenAI-compatible** | Any `/chat/completions` API, using the Online API address and key plus the "API model" setting. |
+| **Ollama (local)** | A model on your own machine through Ollama (default `gemma3:4b`). Long meetings are split into parts and merged. |
+| **My server (local / Claude)** | Your CryRec server writes the notes with its own Ollama or its own Anthropic key. |
+
+Set **Your name** in Settings so action items say your name instead of "Me". Notes are written in English by default; Turkish or the meeting's own language are options. Small local models make a good first draft but sometimes give a task to the wrong person; read action items before you send them on.
+
+`CryRec.exe --notes <folder>` writes notes headless (result in `<folder>\notes.log`).
+
 ## Self-hosted server
 
 Run the transcription on one machine (ideally with an NVIDIA GPU) and point CryRec on your other PCs at it.
@@ -42,6 +57,8 @@ pip install nvidia-cublas-cu12 "nvidia-cudnn-cu12>=9,<10"   # GPU only
 python server/cryrec_server.py --init     # creates %APPDATA%\CryRec\server.json with a random key
 python server/cryrec_server.py            # listens on 127.0.0.1:8765
 ```
+
+For meeting notes the server can use a local Ollama (`ollama_url`, `ollama_model`, `ollama_ctx` in `server.json`) and, if you add `anthropic_api_key` (and optionally `claude_model`), Claude. Before a local notes job it unloads Whisper so both fit on a small GPU.
 
 The server only listens on localhost. Put HTTPS in front of it (Cloudflare Tunnel, Tailscale, a reverse proxy), then in CryRec on each client choose **My server** and enter the address and key under **Settings**. Audio is deleted right after each job, and transcripts are dropped after 24 hours. The model is loaded per batch of jobs and released afterwards, so the GPU stays free for other work. Uploads are MP3 at up to 64 kbps, which fits about 3 hours of meeting into one 95 MB request.
 
@@ -84,5 +101,6 @@ powershell -File packaging\build.ps1
 
 - v0.1: record chosen input + output
 - v0.2: local transcript with Me / Them labels
-- v0.3: engines: This PC (GPU or CPU), self-hosted server, online API (this)
-- v0.4: dictation
+- v0.3: engines: This PC (GPU or CPU), self-hosted server, online API
+- v0.4: meeting notes (summary, decisions, action items) (this)
+- v0.5: dictation

@@ -27,10 +27,11 @@ import pyaudiowpatch as pyaudio
 import soundfile as sf
 import soxr
 
+import summarize as sm
 import transcribe as tr
 
 APP = "CryRec"
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -49,6 +50,8 @@ UPDATE_DIR = (APP_DIR / "updates") if PORTABLE else Path(os.environ.get("LOCALAP
 MUTEX_NAME = "CryRec-singleton-A38983BB-4076-4045-A6FA-5273C2036256"
 MODELS_DIR = (APP_DIR / "models") if PORTABLE else Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP / "models"
 ENGINES = {"local": "This PC", "server": "My server", "api": "Online API"}
+NOTES_ENGINES = {"off": "Off", "claude": "Claude", "openai": "OpenAI-compatible", "ollama": "Ollama (local)",
+                 "server_local": "My server (local)", "server_claude": "My server (Claude)"}
 DEFAULT_API_URL = "https://api.groq.com/openai/v1"
 DEFAULT_API_MODEL = "whisper-large-v3-turbo"
 
@@ -366,6 +369,26 @@ def run_transcript(cfg, session_dir, progress, cancel, cache):
     return tr.transcribe_session(session_dir, cache[(model, device)], language, progress, cancel)
 
 
+def run_notes(cfg, session_dir, progress, cancel):
+    """Write notes.md from transcript.txt with the notes engine chosen in cfg."""
+    transcript = (Path(session_dir) / "transcript.txt").read_text(encoding="utf-8")
+    engine = cfg.get("notes_engine", "off")
+    language = sm.NOTES_LANGUAGES.get(cfg.get("notes_language", "English"), "English")
+    my_name = cfg.get("my_name", "")
+    if engine in ("server_local", "server_claude"):
+        md = sm.remote_notes(cfg.get("server_url", ""), secret_get(cfg, "server_key"), transcript,
+                             "local" if engine == "server_local" else "claude", language, my_name, progress, cancel)
+    else:
+        backend = {
+            "claude": lambda: sm.ClaudeNotes(secret_get(cfg, "claude_key"), cfg.get("claude_model")),
+            "openai": lambda: sm.OpenAINotes(cfg.get("api_url") or DEFAULT_API_URL, secret_get(cfg, "api_key"),
+                                             cfg.get("notes_model") or "llama-3.3-70b-versatile"),
+            "ollama": lambda: sm.OllamaNotes(cfg.get("ollama_url"), cfg.get("ollama_model")),
+        }[engine]()
+        md = backend.notes(transcript, my_name, language, progress, cancel)
+    return sm.write_notes(session_dir, md)
+
+
 class SettingsDialog:
     """Where transcripts are made: GPU use for This PC, your own server, or an online API."""
 
@@ -402,8 +425,18 @@ class SettingsDialog:
         ttk.Button(f, text="Test", command=self.test_api).grid(row=12, column=2, sticky="e", **pad)
         ttk.Label(f, textvariable=self.a_res, foreground="#666").grid(row=12, column=0, columnspan=2, sticky="w", padx=6)
 
+        ttk.Label(f, text="Notes", font=("Segoe UI", 10, "bold")).grid(row=13, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ttk.Label(f, text="Summary, decisions and action items from the transcript.", foreground="#666").grid(row=14, column=0, columnspan=3, sticky="w", padx=6)
+        self.my_name = self._row(f, 15, "Your name", cfg.get("my_name", ""))
+        self.c_key = self._row(f, 16, "Claude key", secret_get(cfg, "claude_key"), show="•")
+        self.c_model = self._row(f, 17, "Claude model", cfg.get("claude_model") or sm.DEFAULT_CLAUDE_MODEL)
+        self.n_model = self._row(f, 18, "API model", cfg.get("notes_model") or "llama-3.3-70b-versatile")
+        self.o_url = self._row(f, 19, "Ollama URL", cfg.get("ollama_url") or sm.DEFAULT_OLLAMA_URL)
+        self.o_model = self._row(f, 20, "Ollama model", cfg.get("ollama_model") or sm.DEFAULT_OLLAMA_MODEL)
+        ttk.Label(f, text="\"API model\" is used with the Online API address and key above.", foreground="#666").grid(row=21, column=0, columnspan=3, sticky="w", padx=6)
+
         b = ttk.Frame(f)
-        b.grid(row=13, column=0, columnspan=3, sticky="e", pady=(12, 0))
+        b.grid(row=22, column=0, columnspan=3, sticky="e", pady=(12, 0))
         ttk.Button(b, text="Save", command=self.save).grid(row=0, column=0, padx=4)
         ttk.Button(b, text="Cancel", command=w.destroy).grid(row=0, column=1)
 
@@ -445,9 +478,13 @@ class SettingsDialog:
 
     def save(self):
         self.cfg.update(use_gpu=self.gpu.get(), server_url=self.s_url.get().strip(),
-                        api_url=self.a_url.get().strip(), api_model=self.a_model.get().strip())
+                        api_url=self.a_url.get().strip(), api_model=self.a_model.get().strip(),
+                        my_name=self.my_name.get().strip(), claude_model=self.c_model.get().strip(),
+                        notes_model=self.n_model.get().strip(), ollama_url=self.o_url.get().strip(),
+                        ollama_model=self.o_model.get().strip())
         secret_set(self.cfg, "server_key", self.s_key.get().strip())
         secret_set(self.cfg, "api_key", self.a_key.get().strip())
+        secret_set(self.cfg, "claude_key", self.c_key.get().strip())
         save_config(self.cfg)
         self.win.destroy()
 
@@ -526,26 +563,36 @@ class App:
         lang = self.cfg.get("language")
         self.lang_var = tk.StringVar(value=lang if lang in tr.LANGUAGES else "Auto")
         ttk.Combobox(opts, textvariable=self.lang_var, values=list(tr.LANGUAGES), state="readonly", width=12).grid(row=0, column=2, padx=(6, 0))
+        ttk.Label(frm, text="Notes").grid(row=9, column=0, sticky="w", **pad)
+        nopts = ttk.Frame(frm)
+        nopts.grid(row=9, column=1, columnspan=2, sticky="w", padx=10)
+        self.notes_var = tk.StringVar(value=NOTES_ENGINES.get(self.cfg.get("notes_engine"), NOTES_ENGINES["off"]))
+        ttk.Combobox(nopts, textvariable=self.notes_var, values=list(NOTES_ENGINES.values()), state="readonly", width=20).grid(row=0, column=0)
+        nl = self.cfg.get("notes_language")
+        self.notes_lang_var = tk.StringVar(value=nl if nl in sm.NOTES_LANGUAGES else "English")
+        ttk.Combobox(nopts, textvariable=self.notes_lang_var, values=list(sm.NOTES_LANGUAGES), state="readonly", width=16).grid(row=0, column=1, padx=(6, 0))
         self.auto_var = tk.BooleanVar(value=self.cfg.get("auto_transcribe", True))
-        ttk.Checkbutton(frm, text="Transcribe after recording", variable=self.auto_var).grid(row=9, column=1, sticky="w", padx=10)
+        ttk.Checkbutton(frm, text="Transcribe (and write notes) after recording", variable=self.auto_var).grid(row=10, column=1, columnspan=2, sticky="w", padx=10)
         tbtns = ttk.Frame(frm)
-        tbtns.grid(row=9, column=2, sticky="e", padx=10)
+        tbtns.grid(row=11, column=0, columnspan=3, sticky="e", padx=10, pady=(4, 0))
         ttk.Button(tbtns, text="Settings", command=self.open_settings).grid(row=0, column=0, padx=(0, 6))
+        self.notes_btn = ttk.Button(tbtns, text="Notes...", command=self.notes_clicked)
+        self.notes_btn.grid(row=0, column=1, padx=(0, 6))
         self.tr_btn = ttk.Button(tbtns, text="Transcribe...", command=self.transcribe_clicked)
-        self.tr_btn.grid(row=0, column=1)
+        self.tr_btn.grid(row=0, column=2)
         self._engine_changed()
         self.t_status = tk.StringVar(value="")
-        ttk.Label(frm, textvariable=self.t_status, foreground="#666", wraplength=430).grid(row=10, column=0, columnspan=3, sticky="w", padx=10)
+        ttk.Label(frm, textvariable=self.t_status, foreground="#666", wraplength=430).grid(row=12, column=0, columnspan=3, sticky="w", padx=10)
         self.t_queue = queue.Queue()
         self.t_cancel = threading.Event()
         self.t_busy = False
         threading.Thread(target=self._transcribe_worker, daemon=True).start()
 
-        ttk.Separator(frm).grid(row=11, column=0, columnspan=3, sticky="ew", pady=(10, 4))
+        ttk.Separator(frm).grid(row=13, column=0, columnspan=3, sticky="ew", pady=(10, 4))
         self.upd_status = tk.StringVar(value="")
-        ttk.Label(frm, textvariable=self.upd_status, foreground="#666").grid(row=12, column=0, columnspan=2, sticky="w", padx=10)
+        ttk.Label(frm, textvariable=self.upd_status, foreground="#666").grid(row=14, column=0, columnspan=2, sticky="w", padx=10)
         self.upd_btn = ttk.Button(frm, text="Check for updates", command=self.update_clicked)
-        self.upd_btn.grid(row=12, column=2, sticky="e", padx=10)
+        self.upd_btn.grid(row=14, column=2, sticky="e", padx=10)
 
         self.updater = Updater(lambda v: root.after(0, lambda: self.update_ready(v)))
         self.updater.start_background()
@@ -599,10 +646,39 @@ class App:
 
     def _transcript_settings(self):
         model = self.model_labels.get(self.model_var.get(), "turbo")
+        notes = next((k for k, v in NOTES_ENGINES.items() if v == self.notes_var.get()), "off")
         self.cfg.update(engine=self._engine(), model=model, language=self.lang_var.get(),
-                        auto_transcribe=self.auto_var.get())
+                        auto_transcribe=self.auto_var.get(), notes_engine=notes,
+                        notes_language=self.notes_lang_var.get())
         save_config(self.cfg)
         return dict(self.cfg)
+
+    def _notes_ready(self, cfg):
+        """UI thread: True if the chosen notes engine has what it needs (asks the user otherwise)."""
+        need = {"claude": ("claude_key", "your Claude API key"), "openai": ("api_key", "your API key"),
+                "server_local": ("server_key", "your server address and key"),
+                "server_claude": ("server_key", "your server address and key")}.get(cfg.get("notes_engine"))
+        if need and not secret_get(cfg, need[0]):
+            messagebox.showinfo(APP, f"Notes: set {need[1]} in Settings first.")
+            return False
+        return True
+
+    def notes_clicked(self):
+        if self.t_busy:
+            return
+        cfg = self._transcript_settings()
+        if cfg["notes_engine"] == "off":
+            messagebox.showinfo(APP, "Pick a notes engine next to \"Notes\" first.")
+            return
+        start = self.session_dir if self.session_dir and self.session_dir.exists() else Path(self.dir_var.get())
+        d = filedialog.askdirectory(initialdir=str(start), title="Pick a recording folder with a transcript")
+        if not d:
+            return
+        if not (Path(d) / "transcript.txt").exists():
+            messagebox.showwarning(APP, "This folder has no transcript.txt yet. Use Transcribe... first.")
+            return
+        if self._notes_ready(cfg):
+            self.t_queue.put((Path(d), cfg, "notes"))
 
     def open_settings(self):
         SettingsDialog(self.root, self.cfg)
@@ -637,23 +713,34 @@ class App:
         if engine == "api" and not secret_get(cfg, "api_key"):
             messagebox.showinfo(APP, "Set your API key in Settings first.")
             return
-        self.t_queue.put((session_dir, cfg))
+        if cfg["notes_engine"] != "off" and not self._notes_ready(cfg):
+            cfg["notes_engine"] = "off"  # still make the transcript
+        self.t_queue.put((session_dir, cfg, "all"))
         if not self.t_busy:
             self.t_status.set("Transcript queued...")
 
     def _transcribe_worker(self):
         loaded = {}
         while True:
-            session_dir, cfg = self.t_queue.get()
+            session_dir, cfg, mode = self.t_queue.get()
             self.t_cancel.clear()
             self._t_ui(busy=True)
 
             def progress(frac, text, name=session_dir.name):
                 self._t_ui(text=f"{name}: {text} ({frac * 100:.0f}%)")
             try:
-                out = run_transcript(cfg, session_dir, progress, self.t_cancel.is_set, loaded)
-                msg = f"Transcript saved: {out}"
-            except tr.Cancelled:
+                if mode == "all":
+                    out = run_transcript(cfg, session_dir, progress, self.t_cancel.is_set, loaded)
+                    msg = f"Transcript saved: {out}"
+                if cfg.get("notes_engine", "off") != "off":
+                    try:
+                        notes = run_notes(cfg, session_dir, progress, self.t_cancel.is_set)
+                        msg = f"Transcript and notes saved: {notes.parent}" if mode == "all" else f"Notes saved: {notes}"
+                    except (tr.Cancelled, sm.Cancelled):
+                        raise
+                    except Exception as e:
+                        msg = (f"Transcript saved, notes failed: {e}" if mode == "all" else f"Notes failed: {e}")
+            except (tr.Cancelled, sm.Cancelled):
                 msg = "Transcript cancelled."
                 while not self.t_queue.empty():
                     self.t_queue.get_nowait()
@@ -951,6 +1038,18 @@ def main():
         out = Path(sys.argv[2]) / "transcript.log"
         try:
             res = f"OK {run_transcript(cfg, Path(sys.argv[2]), lambda f, t: None, lambda: False, {})}"
+            if cfg.get("notes_engine", "off") != "off":
+                res += f"\nOK {run_notes(cfg, Path(sys.argv[2]), lambda f, t: None, lambda: False)}"
+        except Exception as e:
+            res = f"FAIL {e!r}"
+        out.write_text(res, encoding="utf-8")
+        return
+    if len(sys.argv) > 2 and sys.argv[1] == "--notes":
+        # headless: notes.md from an existing transcript.txt with the saved notes engine
+        cfg = load_config()
+        out = Path(sys.argv[2]) / "notes.log"
+        try:
+            res = f"OK {run_notes(cfg, Path(sys.argv[2]), lambda f, t: None, lambda: False)}"
         except Exception as e:
             res = f"FAIL {e!r}"
         out.write_text(res, encoding="utf-8")
