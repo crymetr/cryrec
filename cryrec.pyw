@@ -21,6 +21,12 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+try:  # trust the Windows certificate store, so HTTPS works behind TLS-inspecting proxies (Zscaler etc.)
+    import truststore
+    truststore.inject_into_ssl()
+except Exception:
+    pass
+
 import lameenc
 import numpy as np
 import pyaudiowpatch as pyaudio
@@ -31,7 +37,7 @@ import summarize as sm
 import transcribe as tr
 
 APP = "CryRec"
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
