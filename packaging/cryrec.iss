@@ -39,6 +39,10 @@ Name: "{group}\CryRec"; Filename: "{app}\CryRec.exe"
 Name: "{group}\Uninstall CryRec"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\CryRec"; Filename: "{app}\CryRec.exe"; Tasks: desktopicon
 
+[Registry]
+; CryRec adds this itself when you pick "Start with Windows"; remove it on uninstall
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "CryRec"; Flags: uninsdeletevalue
+
 [Run]
 Filename: "{app}\CryRec.exe"; Description: "Start CryRec"; Flags: nowait postinstall skipifsilent
 ; After a silent in-app update, start the new version again.

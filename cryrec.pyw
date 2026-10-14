@@ -33,11 +33,12 @@ import pyaudiowpatch as pyaudio
 import soundfile as sf
 import soxr
 
+import callwatch
 import summarize as sm
 import transcribe as tr
 
 APP = "CryRec"
-VERSION = "0.5.1"
+VERSION = "0.6.0"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -205,12 +206,15 @@ def cleanup_old_update():
 
 
 def hold_mutex():
-    """Named mutex the installer waits on, so it never replaces files while CryRec runs."""
+    """Named mutex the installer waits on, so it never replaces files while CryRec runs.
+    Returns (handle, already_running)."""
     try:
         import ctypes
-        return ctypes.windll.kernel32.CreateMutexW(None, False, MUTEX_NAME)
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        h = k32.CreateMutexW(None, False, MUTEX_NAME)
+        return h, ctypes.get_last_error() == 183  # ERROR_ALREADY_EXISTS
     except Exception:
-        return None
+        return None, False
 
 
 class Track:
@@ -433,6 +437,104 @@ def run_notes(cfg, session_dir, progress, cancel):
     return sm.write_notes(session_dir, md)
 
 
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+SHOW_FLAG = CONFIG_DIR / "show.flag"  # a second launch drops this so the running copy shows its window
+SILENCE_LEVEL = 0.02  # peak level under which a track counts as silent
+
+
+def _int(text, default, lo, hi):
+    try:
+        return max(lo, min(hi, int(str(text).strip())))
+    except ValueError:
+        return default
+
+
+def _launch_command(hidden=True):
+    if FROZEN:
+        cmd = f'"{sys.executable}"'
+    else:
+        pyw = Path(sys.executable).with_name("pythonw.exe")
+        cmd = f'"{pyw if pyw.exists() else sys.executable}" "{Path(__file__).resolve()}"'
+    return cmd + (" --hidden" if hidden else "")
+
+
+def autostart_enabled():
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
+            winreg.QueryValueEx(k, APP)
+            return True
+    except OSError:
+        return False
+
+
+def set_autostart(on):
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+            if on:
+                winreg.SetValueEx(k, APP, 0, winreg.REG_SZ, _launch_command(hidden=True))
+            else:
+                winreg.DeleteValue(k, APP)
+    except OSError:
+        pass
+
+
+class Popup:
+    """Small always-on-top box in the bottom-right corner, with buttons and an optional countdown."""
+
+    def __init__(self, root, title, message, buttons, countdown=None, on_timeout=None, countdown_text="{s} s"):
+        self.root, self.on_timeout, self.left = root, on_timeout, countdown
+        self.countdown_text = countdown_text
+        w = self.win = tk.Toplevel(root)
+        w.title(title)
+        w.resizable(False, False)
+        w.attributes("-topmost", True)
+        try:
+            w.iconbitmap(str(RES_DIR / "cryrec.ico"))
+        except tk.TclError:
+            pass
+        f = ttk.Frame(w, padding=14)
+        f.grid()
+        ttk.Label(f, text=message, wraplength=320, font=("Segoe UI", 10)).grid(row=0, column=0, sticky="w")
+        self.count = tk.StringVar()
+        ttk.Label(f, textvariable=self.count, foreground="#666").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        b = ttk.Frame(f)
+        b.grid(row=2, column=0, sticky="e", pady=(10, 0))
+        for i, (label, fn) in enumerate(buttons):
+            ttk.Button(b, text=label, command=lambda fn=fn: self._click(fn)).grid(row=0, column=i, padx=(6 if i else 0, 0))
+        w.protocol("WM_DELETE_WINDOW", self.close)
+        w.update_idletasks()
+        x = w.winfo_screenwidth() - w.winfo_reqwidth() - 24
+        y = w.winfo_screenheight() - w.winfo_reqheight() - 80
+        w.geometry(f"+{x}+{y}")
+        w.bell()
+        self.alive = True
+        if countdown:
+            self._tick()
+
+    def _tick(self):
+        if not self.alive:
+            return
+        if self.left <= 0:
+            self.close()
+            if self.on_timeout:
+                self.on_timeout()
+            return
+        self.count.set(self.countdown_text.format(s=self.left))
+        self.left -= 1
+        self.win.after(1000, self._tick)
+
+    def _click(self, fn):
+        self.close()
+        fn()
+
+    def close(self):
+        if self.alive:
+            self.alive = False
+            self.win.destroy()
+
+
 class VocabularyEditor:
     """Edit vocabulary.txt: names and terms, and "wrong -> right" fixes."""
 
@@ -480,8 +582,17 @@ class SettingsDialog:
         w.resizable(False, False)
         w.transient(parent)
         w.grab_set()
-        f = ttk.Frame(w, padding=12)
-        f.grid()
+        outer = ttk.Frame(w, padding=10)
+        outer.grid()
+        nb = ttk.Notebook(outer)
+        nb.grid(row=0, column=0)
+        f = ttk.Frame(nb, padding=10)      # transcript
+        fn = ttk.Frame(nb, padding=10)     # notes and Claude
+        fc = ttk.Frame(nb, padding=10)     # calls and dictation
+        nb.add(f, text="Transcript")
+        nb.add(fn, text="Notes & Claude")
+        nb.add(fc, text="Calls & dictation")
+        self.calls_tab = fc
         pad = {"padx": 6, "pady": 3}
 
         ttk.Label(f, text="This PC", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
@@ -506,26 +617,46 @@ class SettingsDialog:
         ttk.Button(f, text="Test", command=self.test_api).grid(row=12, column=2, sticky="e", **pad)
         ttk.Label(f, textvariable=self.a_res, foreground="#666").grid(row=12, column=0, columnspan=2, sticky="w", padx=6)
 
-        ttk.Label(f, text="Notes", font=("Segoe UI", 10, "bold")).grid(row=13, column=0, columnspan=3, sticky="w", pady=(10, 0))
-        ttk.Label(f, text="Summary, decisions and action items from the transcript.", foreground="#666").grid(row=14, column=0, columnspan=3, sticky="w", padx=6)
-        self.my_name = self._row(f, 15, "Your name", cfg.get("my_name", ""))
-        self.c_key = self._row(f, 16, "Claude key", secret_get(cfg, "claude_key"), show="•")
-        self.c_model = self._row(f, 17, "Claude model", cfg.get("claude_model") or sm.DEFAULT_CLAUDE_MODEL)
-        self.n_model = self._row(f, 18, "API model", cfg.get("notes_model") or "llama-3.3-70b-versatile")
-        self.o_url = self._row(f, 19, "Ollama URL", cfg.get("ollama_url") or sm.DEFAULT_OLLAMA_URL)
-        self.o_model = self._row(f, 20, "Ollama model", cfg.get("ollama_model") or sm.DEFAULT_OLLAMA_MODEL)
-        ttk.Label(f, text="\"API model\" is used with the Online API address and key above.", foreground="#666").grid(row=21, column=0, columnspan=3, sticky="w", padx=6)
-
-        ttk.Label(f, text="Transcript quality", font=("Segoe UI", 10, "bold")).grid(row=22, column=0, columnspan=3, sticky="w", pady=(10, 0))
-        ttk.Label(f, text="Clean up").grid(row=23, column=0, sticky="w", padx=6, pady=3)
+        ttk.Label(f, text="Transcript quality", font=("Segoe UI", 10, "bold")).grid(row=13, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ttk.Label(f, text="Clean up").grid(row=14, column=0, sticky="w", padx=6, pady=3)
         self.clean_var = tk.StringVar(value=CLEAN_ENGINES.get(cfg.get("clean_engine"), CLEAN_ENGINES["off"]))
-        ttk.Combobox(f, textvariable=self.clean_var, values=list(CLEAN_ENGINES.values()), state="readonly", width=20).grid(row=23, column=1, sticky="w", padx=6)
-        ttk.Button(f, text="Vocabulary...", command=lambda: VocabularyEditor(self.win)).grid(row=23, column=2, sticky="e", padx=6)
+        ttk.Combobox(f, textvariable=self.clean_var, values=list(CLEAN_ENGINES.values()), state="readonly", width=20).grid(row=14, column=1, sticky="w", padx=6)
+        ttk.Button(f, text="Vocabulary...", command=lambda: VocabularyEditor(self.win)).grid(row=14, column=2, sticky="e", padx=6)
         ttk.Label(f, text="Clean up: Claude fixes capitals, punctuation and misheard terms (original kept).",
-                  foreground="#666").grid(row=24, column=0, columnspan=3, sticky="w", padx=6)
+                  foreground="#666").grid(row=15, column=0, columnspan=3, sticky="w", padx=6)
 
-        b = ttk.Frame(f)
-        b.grid(row=25, column=0, columnspan=3, sticky="e", pady=(12, 0))
+        ttk.Label(fn, text="Notes", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(fn, text="Summary, decisions and action items from the transcript.", foreground="#666").grid(row=1, column=0, columnspan=3, sticky="w", padx=6)
+        self.my_name = self._row(fn, 2, "Your name", cfg.get("my_name", ""))
+        self.n_model = self._row(fn, 3, "API model", cfg.get("notes_model") or "llama-3.3-70b-versatile")
+        self.o_url = self._row(fn, 4, "Ollama URL", cfg.get("ollama_url") or sm.DEFAULT_OLLAMA_URL)
+        self.o_model = self._row(fn, 5, "Ollama model", cfg.get("ollama_model") or sm.DEFAULT_OLLAMA_MODEL)
+        ttk.Label(fn, text="\"API model\" uses the Online API address and key (Transcript tab).", foreground="#666").grid(row=6, column=0, columnspan=3, sticky="w", padx=6)
+        ttk.Label(fn, text="Claude", font=("Segoe UI", 10, "bold")).grid(row=7, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ttk.Label(fn, text="Used for notes, transcript cleanup and dictation polish when Claude is picked.", foreground="#666").grid(row=8, column=0, columnspan=3, sticky="w", padx=6)
+        self.c_key = self._row(fn, 9, "Claude key", secret_get(cfg, "claude_key"), show="•")
+        self.c_model = self._row(fn, 10, "Claude model", cfg.get("claude_model") or sm.DEFAULT_CLAUDE_MODEL)
+
+        ttk.Label(fc, text="Calls", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
+        self.watch = tk.BooleanVar(value=cfg.get("watch_calls", True))
+        ttk.Checkbutton(fc, text="Notice Teams, Zoom and Webex calls and offer to record them",
+                        variable=self.watch).grid(row=1, column=0, columnspan=3, sticky="w", **pad)
+        self.autostart = tk.BooleanVar(value=autostart_enabled())
+        ttk.Checkbutton(fc, text="Start CryRec with Windows (in the tray)",
+                        variable=self.autostart).grid(row=2, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Label(fc, text="Silence warning after").grid(row=3, column=0, sticky="w", **pad)
+        sil = ttk.Frame(fc)
+        sil.grid(row=3, column=1, columnspan=2, sticky="w", padx=6)
+        self.silence = tk.StringVar(value=str(cfg.get("silence_minutes", 5)))
+        ttk.Spinbox(sil, from_=0, to=60, width=5, textvariable=self.silence).grid(row=0, column=0)
+        ttk.Label(sil, text="minutes (0 = off)").grid(row=0, column=1, padx=6)
+        ttk.Label(fc, text="When a call ends or nothing is heard for that long, CryRec asks and then stops\n"
+                           "by itself after 30 seconds. It never records without asking.",
+                  foreground="#666").grid(row=4, column=0, columnspan=3, sticky="w", padx=6)
+        self.calls_next_row = 5
+
+        b = ttk.Frame(outer)
+        b.grid(row=1, column=0, sticky="e", pady=(10, 0))
         ttk.Button(b, text="Save", command=self.save).grid(row=0, column=0, padx=4)
         ttk.Button(b, text="Cancel", command=w.destroy).grid(row=0, column=1)
 
@@ -571,7 +702,10 @@ class SettingsDialog:
                         my_name=self.my_name.get().strip(), claude_model=self.c_model.get().strip(),
                         notes_model=self.n_model.get().strip(), ollama_url=self.o_url.get().strip(),
                         ollama_model=self.o_model.get().strip(),
-                        clean_engine=next((k for k, v in CLEAN_ENGINES.items() if v == self.clean_var.get()), "off"))
+                        clean_engine=next((k for k, v in CLEAN_ENGINES.items() if v == self.clean_var.get()), "off"),
+                        watch_calls=self.watch.get(), silence_minutes=_int(self.silence.get(), 5, 0, 60))
+        if self.autostart.get() != autostart_enabled():
+            set_autostart(self.autostart.get())
         secret_set(self.cfg, "server_key", self.s_key.get().strip())
         secret_set(self.cfg, "api_key", self.a_key.get().strip())
         secret_set(self.cfg, "claude_key", self.c_key.get().strip())
@@ -580,7 +714,8 @@ class SettingsDialog:
 
 
 class App:
-    def __init__(self, root):
+    def __init__(self, root, hidden=False):
+        self.hidden = hidden
         self.root = root
         self.cfg = load_config()
         self.pa = pyaudio.PyAudio()
@@ -597,7 +732,7 @@ class App:
         except tk.TclError:
             pass
         root.resizable(False, False)
-        root.protocol("WM_DELETE_WINDOW", self.on_close)
+        root.protocol("WM_DELETE_WINDOW", self.quit)
 
         pad = {"padx": 10, "pady": 4}
         frm = ttk.Frame(root, padding=10)
@@ -689,6 +824,132 @@ class App:
 
         self.load_devices()
         self.tick()
+
+        # calls, silence, tray
+        self.calls = callwatch.CallWatcher(self.on_call_start, self.on_call_end)
+        self.call_app = None
+        self.start_popup = self.end_popup = None
+        self.last_sound = time.monotonic()
+        self.tray = None
+        self._setup_tray()
+        root.protocol("WM_DELETE_WINDOW", self.hide_or_quit)
+        root.after(2000, self._poll_calls)
+        root.after(1000, self._poll_show_flag)
+        if self.hidden:
+            root.withdraw()
+        elif not self.cfg.get("asked_autostart"):
+            root.after(800, self._ask_autostart)
+
+    # ---------- calls and silence ----------
+    def _poll_calls(self):
+        if self.cfg.get("watch_calls", True):
+            try:
+                self.calls.poll()
+            except Exception:
+                pass
+        self.root.after(3000, self._poll_calls)
+
+    def on_call_start(self, app):
+        if self.recording:
+            self.call_app = self.call_app or app
+            return
+        if self.start_popup and self.start_popup.alive:
+            return
+
+        def record():
+            self.call_app = app
+            self.start()
+        self.start_popup = Popup(self.root, APP, f"{app} call started. Record it?\n"
+                                 "Tell the others that you are recording.",
+                                 [("Record", record), ("Ignore", lambda: None)], countdown=120,
+                                 countdown_text="This closes in {s} s")
+
+    def on_call_end(self, app):
+        if self.start_popup and self.start_popup.alive:
+            self.start_popup.close()
+        if self.recording and self.call_app in (None, app):
+            self._ask_stop(f"{app} call ended. Stop and save the recording?")
+
+    def _check_silence(self, levels):
+        mins = self.cfg.get("silence_minutes", 5)
+        now = time.monotonic()
+        if max(levels, default=0) > SILENCE_LEVEL:
+            self.last_sound = now
+        elif mins and now - self.last_sound > mins * 60:
+            self._ask_stop(f"No sound for {mins} minutes. Is the meeting over?")
+            self.last_sound = now
+
+    def _ask_stop(self, message):
+        if self.end_popup and self.end_popup.alive:
+            return
+
+        def keep():
+            self.last_sound = time.monotonic()
+        self.end_popup = Popup(self.root, APP, message, [("Stop now", self.stop_if_recording),
+                                                         ("Keep recording", keep)],
+                               countdown=30, on_timeout=self.stop_if_recording,
+                               countdown_text="Stopping by itself in {s} s")
+
+    def stop_if_recording(self):
+        if self.recording:
+            self.stop()
+
+    # ---------- window and tray ----------
+    def _setup_tray(self):
+        try:
+            import pystray
+            from PIL import Image
+            img = Image.open(RES_DIR / "cryrec.ico")
+        except Exception:
+            return  # no tray: closing the window quits, as before
+
+        def on_ui(fn):
+            return lambda icon, item: self.root.after(0, fn)
+        menu = pystray.Menu(
+            pystray.MenuItem("Open CryRec", on_ui(self.show), default=True),
+            pystray.MenuItem(lambda item: "Stop recording" if self.recording else "Start recording",
+                             on_ui(self.toggle)),
+            pystray.MenuItem("Quit", on_ui(self.quit)))
+        self.tray = pystray.Icon(APP, img, APP, menu)
+        self.tray.run_detached()
+
+    def _tray_title(self):
+        if self.tray:
+            self.tray.title = f"{APP}: recording" if self.recording else APP
+            self.tray.update_menu()
+
+    def show(self):
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def hide_or_quit(self):
+        if not self.tray:
+            return self.quit()
+        self.root.withdraw()
+        if not self.cfg.get("told_tray"):
+            self.cfg["told_tray"] = True
+            save_config(self.cfg)
+            try:
+                self.tray.notify("CryRec keeps running here and will notice calls. Right-click > Quit to exit.", APP)
+            except Exception:
+                pass
+
+    def _poll_show_flag(self):
+        if SHOW_FLAG.exists():
+            try:
+                SHOW_FLAG.unlink()
+            except OSError:
+                pass
+            self.show()
+        self.root.after(1000, self._poll_show_flag)
+
+    def _ask_autostart(self):
+        self.cfg["asked_autostart"] = True
+        save_config(self.cfg)
+        if messagebox.askyesno(APP, "Start CryRec with Windows?\n\nIt then waits in the tray and offers to record "
+                                    "when a Teams, Zoom or Webex call starts. You can change this in Settings."):
+            set_autostart(True)
 
     # ---------- updates ----------
     def update_ready(self, version):
@@ -964,6 +1225,10 @@ class App:
         self.in_box.config(state="disabled")
         self.out_box.config(state="disabled")
         self.status.set(f"Recording to {self.session_dir}")
+        self.last_sound = time.monotonic()
+        if self.start_popup and self.start_popup.alive:
+            self.start_popup.close()
+        self._tray_title()
 
     def _teardown(self):
         for t in self.tracks:
@@ -975,6 +1240,10 @@ class App:
     def stop(self):
         self._teardown()
         self.recording = False
+        self.call_app = None
+        if self.end_popup and self.end_popup.alive:
+            self.end_popup.close()
+        self._tray_title()
         self.rec_btn.config(text="● Record", state="disabled")
         self.in_box.config(state="readonly")
         self.out_box.config(state="readonly")
@@ -1002,6 +1271,7 @@ class App:
             lv = {t.role: t.level for t in self.tracks}
             self.in_meter["value"] = lv.get("mic", 0)
             self.out_meter["value"] = lv.get("spk", 0)
+            self._check_silence(lv.values())
         else:
             self.in_meter["value"] = 0
             self.out_meter["value"] = 0
@@ -1017,7 +1287,9 @@ class App:
         target.mkdir(parents=True, exist_ok=True)
         os.startfile(target)
 
-    def on_close(self):
+    def quit(self):
+        if self.recording:
+            self.show()
         if self.recording and not messagebox.askyesno(APP, "Recording is running. Stop and save before closing?"):
             return
         if not self.recording and self.t_busy and not messagebox.askyesno(
@@ -1027,6 +1299,11 @@ class App:
         if self.recording:
             self._teardown()
             finalize(self.tracks, self.session_dir)
+        if self.tray:
+            try:
+                self.tray.stop()
+            except Exception:
+                pass
         self.pa.terminate()
         self.root.destroy()
 
@@ -1165,14 +1442,21 @@ def main():
         if up.check() == "newer" and up.path:
             up.apply()
         return
-    _mutex = hold_mutex()  # noqa: F841  (kept alive for the process lifetime)
+    _mutex, already = hold_mutex()  # handle kept alive for the process lifetime
+    if already:  # one CryRec at a time: ask the running one to show itself
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            SHOW_FLAG.write_text("show")
+        except OSError:
+            pass
+        return
     cleanup_old_update()
     root = tk.Tk()
     try:
         ttk.Style().theme_use("vista")
     except tk.TclError:
         pass
-    App(root)
+    App(root, hidden="--hidden" in sys.argv)
     root.mainloop()
 
 

@@ -32,6 +32,15 @@ Keys are stored encrypted for your Windows user (DPAPI), not as plain text.
 
 `CryRec.exe --transcribe <folder>` does the same headless (result in `<folder>\transcript.log`).
 
+## Calls and silence
+
+CryRec can sit in the tray (closing the window hides it; right-click the tray icon > Quit to exit) and start with Windows. While it runs:
+
+- When Teams, Zoom or Webex starts using the microphone, a small box asks **Record it?** It never records without asking.
+- When that call ends, or when neither the mic nor the speaker has made a sound for a few minutes (5 by default), it asks **Stop and save?** and stops by itself after 30 seconds if you don't answer.
+
+It reads which app is using the microphone from Windows (`CapabilityAccessManager` in the registry): no admin rights, no meeting-app plugins. Turn it on or off under **Settings → Calls & dictation**.
+
 ## Vocabulary and cleanup
 
 Speech recognition mishears names, product names and in-house terms. Two tools fix that (**Settings → Transcript quality**):
@@ -112,5 +121,6 @@ powershell -File packaging\build.ps1
 - v0.2: local transcript with Me / Them labels
 - v0.3: engines: This PC (GPU or CPU), self-hosted server, online API
 - v0.4: meeting notes (summary, decisions, action items)
-- v0.5: vocabulary, transcript cleanup, fewer Whisper loops (this)
-- v0.6: dictation
+- v0.5: vocabulary, transcript cleanup, fewer Whisper loops
+- v0.6: tray, start with Windows, call detection and silence warning (this)
+- v0.7: dictation

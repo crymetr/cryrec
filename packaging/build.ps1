@@ -7,7 +7,7 @@ $dist = Join-Path $root 'dist'
 
 $common = @('--noconfirm', '--clean', '--windowed', '--name', 'CryRec',
     '--icon', "$root\cryrec.ico", '--add-data', "$root\cryrec.ico;.", '--paths', $root,
-    '--collect-data', 'faster_whisper', '--collect-binaries', 'ctranslate2', '--collect-binaries', 'onnxruntime',
+    '--collect-data', 'faster_whisper', '--collect-binaries', 'ctranslate2', '--collect-binaries', 'onnxruntime', '--hidden-import', 'pystray._win32',
     '--workpath', $work, '--specpath', $work, "$root\cryrec.pyw")
 # Folder build for the installer: starts fast, nothing to unpack on launch
 python -m PyInstaller @common --onedir --distpath "$work\onedir"
