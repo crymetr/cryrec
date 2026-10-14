@@ -37,7 +37,7 @@ import summarize as sm
 import transcribe as tr
 
 APP = "CryRec"
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -1141,6 +1141,8 @@ def main():
         out = Path(sys.argv[2]) / "transcript.log"
         try:
             res = f"OK {run_transcript(cfg, Path(sys.argv[2]), lambda f, t: None, lambda: False, {})}"
+            if cfg.get("clean_engine", "off") != "off":
+                res += f"\nOK cleaned, {run_clean(cfg, Path(sys.argv[2]), lambda f, t: None, lambda: False)} lines left as heard"
             if cfg.get("notes_engine", "off") != "off":
                 res += f"\nOK {run_notes(cfg, Path(sys.argv[2]), lambda f, t: None, lambda: False)}"
         except Exception as e:
