@@ -32,6 +32,15 @@ Keys are stored encrypted for your Windows user (DPAPI), not as plain text.
 
 `CryRec.exe --transcribe <folder>` does the same headless (result in `<folder>\transcript.log`).
 
+## Vocabulary and cleanup
+
+Speech recognition mishears names, product names and in-house terms. Two tools fix that (**Settings → Transcript quality**):
+
+- **Vocabulary...**: one name or term per line (`Power BI`, `Alex Chen`). These go to Whisper as spelling hints with every 30-second window, and to the notes prompt. A line like `power pi -> Power BI` also replaces that phrase after transcription, for words that still come out wrong. The file is `vocabulary.txt` next to the settings. A CryRec server can keep its own list too (`vocabulary_file` in `server.json`); it is merged with each client's list, so every PC that uses the server benefits.
+- **Clean up** (off by default): Claude fixes capitals, punctuation and misheard terms line by line, using the vocabulary. Timestamps and speakers are checked after each part; a part that doesn't line up keeps its original lines. The original stays as `transcript.raw.txt`. About $0.25 to $0.50 per 1.5-hour meeting, depending on the model.
+
+Also built in: long Whisper segments are split where the speaker pauses (so turns stay in order), repeated filler loops ("Mhm. Mhm. Mhm.") are collapsed, and the mic track uses a stricter speech threshold, because headsets and speakers leak the other side's voice into the mic.
+
 ## Meeting notes
 
 With a notes engine picked next to "Notes", CryRec also writes `notes.md` after the transcript: **Summary**, **Decisions**, **Action items** (`- [ ] Owner: task`) and **Open questions**. **Notes...** writes (or rewrites) notes for any folder that already has a transcript, so you can pick a different engine per meeting.
@@ -102,5 +111,6 @@ powershell -File packaging\build.ps1
 - v0.1: record chosen input + output
 - v0.2: local transcript with Me / Them labels
 - v0.3: engines: This PC (GPU or CPU), self-hosted server, online API
-- v0.4: meeting notes (summary, decisions, action items) (this)
-- v0.5: dictation
+- v0.4: meeting notes (summary, decisions, action items)
+- v0.5: vocabulary, transcript cleanup, fewer Whisper loops (this)
+- v0.6: dictation

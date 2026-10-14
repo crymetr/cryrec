@@ -37,13 +37,19 @@ import summarize as sm
 import transcribe as tr
 
 APP = "CryRec"
-VERSION = "0.4.1"
+VERSION = "0.5.0"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
 PORTABLE = (APP_DIR / "portable").exists()
 CONFIG_DIR = APP_DIR if PORTABLE else Path(os.environ.get("APPDATA", Path.home())) / APP
 CONFIG_FILE = CONFIG_DIR / "cryrec.json"
+VOCAB_FILE = CONFIG_DIR / "vocabulary.txt"
+VOCAB_TEMPLATE = """# CryRec vocabulary: helps the transcript spell your names and terms right.
+# One term per line, e.g.:   Power BI
+# Fix a word that keeps coming out wrong:   power pi -> Power BI
+# Lines starting with # are ignored.
+"""
 DEFAULT_OUT = (APP_DIR / "Recordings") if PORTABLE else Path.home() / "Documents" / "Recordings"
 NO_DEVICE = "(none)"
 CHUNK_MS = 50
@@ -56,6 +62,7 @@ UPDATE_DIR = (APP_DIR / "updates") if PORTABLE else Path(os.environ.get("LOCALAP
 MUTEX_NAME = "CryRec-singleton-A38983BB-4076-4045-A6FA-5273C2036256"
 MODELS_DIR = (APP_DIR / "models") if PORTABLE else Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP / "models"
 ENGINES = {"local": "This PC", "server": "My server", "api": "Online API"}
+CLEAN_ENGINES = {"off": "Off", "claude": "Claude", "server_claude": "My server (Claude)"}
 NOTES_ENGINES = {"off": "Off", "claude": "Claude", "openai": "OpenAI-compatible", "ollama": "Ollama (local)",
                  "server_local": "My server (local)", "server_claude": "My server (Claude)"}
 DEFAULT_API_URL = "https://api.groq.com/openai/v1"
@@ -354,16 +361,24 @@ def secret_set(cfg, name, value):
         cfg.pop(name + "_enc", None)
 
 
+def load_vocabulary():
+    try:
+        return VOCAB_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
 def run_transcript(cfg, session_dir, progress, cancel, cache):
     """Transcribe one recording folder with the engine chosen in cfg. cache keeps a loaded local model."""
     engine, language = cfg.get("engine", "local"), cfg.get("language", "Auto")
+    vocab = load_vocabulary()
     if engine == "server":
         return tr.remote_transcribe(session_dir, cfg.get("server_url", ""), secret_get(cfg, "server_key"),
-                                    language, progress, cancel)
+                                    language, progress, cancel, vocab)
     if engine == "api":
         eng = tr.ApiEngine(cfg.get("api_url") or DEFAULT_API_URL, secret_get(cfg, "api_key"),
                            cfg.get("api_model") or DEFAULT_API_MODEL)
-        return tr.transcribe_session(session_dir, eng, language, progress, cancel)
+        return tr.transcribe_session(session_dir, eng, language, progress, cancel, vocab)
     model = cfg.get("model", "turbo")
     device = "auto" if cfg.get("use_gpu", True) else "cpu"
     if not tr.model_ready(MODELS_DIR, model):
@@ -372,7 +387,27 @@ def run_transcript(cfg, session_dir, progress, cancel, cache):
         cache.clear()
         progress(0.0, "loading speech model...")
         cache[(model, device)] = tr.LocalEngine(MODELS_DIR, model, device)
-    return tr.transcribe_session(session_dir, cache[(model, device)], language, progress, cancel)
+    return tr.transcribe_session(session_dir, cache[(model, device)], language, progress, cancel, vocab)
+
+
+def run_clean(cfg, session_dir, progress, cancel):
+    """Claude fixes casing, punctuation and misheard terms in transcript.txt (the original is kept as
+    transcript.raw.txt). Returns how many lines were left unchanged because an answer didn't line up."""
+    session_dir = Path(session_dir)
+    txt = session_dir / "transcript.txt"
+    raw = txt.read_text(encoding="utf-8")
+    vocab = load_vocabulary()
+    if cfg.get("clean_engine") == "server_claude":
+        cleaned, kept = sm.remote_clean(cfg.get("server_url", ""), secret_get(cfg, "server_key"), raw,
+                                        progress, cancel, vocab)
+    else:
+        claude = sm.ClaudeNotes(secret_get(cfg, "claude_key"), cfg.get("claude_model"))
+        glossary, _ = tr.parse_vocabulary(vocab)
+        cleaned, kept = sm.clean_transcript(raw, lambda s, u: claude.ask(s, u, cancel, effort="low")[0],
+                                            glossary, progress, cancel)
+    (session_dir / "transcript.raw.txt").write_text(raw, encoding="utf-8")
+    txt.write_text(cleaned, encoding="utf-8")
+    return kept
 
 
 def run_notes(cfg, session_dir, progress, cancel):
@@ -381,9 +416,12 @@ def run_notes(cfg, session_dir, progress, cancel):
     engine = cfg.get("notes_engine", "off")
     language = sm.NOTES_LANGUAGES.get(cfg.get("notes_language", "English"), "English")
     my_name = cfg.get("my_name", "")
+    vocab = load_vocabulary()
+    glossary, _ = tr.parse_vocabulary(vocab)
     if engine in ("server_local", "server_claude"):
         md = sm.remote_notes(cfg.get("server_url", ""), secret_get(cfg, "server_key"), transcript,
-                             "local" if engine == "server_local" else "claude", language, my_name, progress, cancel)
+                             "local" if engine == "server_local" else "claude", language, my_name, progress, cancel,
+                             vocab)
     else:
         backend = {
             "claude": lambda: sm.ClaudeNotes(secret_get(cfg, "claude_key"), cfg.get("claude_model")),
@@ -391,8 +429,45 @@ def run_notes(cfg, session_dir, progress, cancel):
                                              cfg.get("notes_model") or "llama-3.3-70b-versatile"),
             "ollama": lambda: sm.OllamaNotes(cfg.get("ollama_url"), cfg.get("ollama_model")),
         }[engine]()
-        md = backend.notes(transcript, my_name, language, progress, cancel)
+        md = backend.notes(transcript, my_name, language, progress, cancel, glossary)
     return sm.write_notes(session_dir, md)
+
+
+class VocabularyEditor:
+    """Edit vocabulary.txt: names and terms, and "wrong -> right" fixes."""
+
+    def __init__(self, parent):
+        w = self.win = tk.Toplevel(parent)
+        w.title(f"{APP} vocabulary")
+        w.transient(parent)
+        w.grab_set()
+        f = ttk.Frame(w, padding=10)
+        f.grid(sticky="nsew")
+        w.columnconfigure(0, weight=1)
+        w.rowconfigure(0, weight=1)
+        f.columnconfigure(0, weight=1)
+        f.rowconfigure(1, weight=1)
+        ttk.Label(f, text="One name or term per line. To fix a word that keeps coming out wrong: wrong -> right",
+                  foreground="#666").grid(row=0, column=0, sticky="w")
+        self.text = tk.Text(f, width=60, height=20, font=("Consolas", 10), undo=True)
+        self.text.grid(row=1, column=0, sticky="nsew", pady=6)
+        sb = ttk.Scrollbar(f, command=self.text.yview)
+        sb.grid(row=1, column=1, sticky="ns", pady=6)
+        self.text.config(yscrollcommand=sb.set)
+        self.text.insert("1.0", load_vocabulary() or VOCAB_TEMPLATE)
+        b = ttk.Frame(f)
+        b.grid(row=2, column=0, columnspan=2, sticky="e")
+        ttk.Button(b, text="Save", command=self.save).grid(row=0, column=0, padx=4)
+        ttk.Button(b, text="Cancel", command=w.destroy).grid(row=0, column=1)
+
+    def save(self):
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            VOCAB_FILE.write_text(self.text.get("1.0", "end").rstrip() + "\n", encoding="utf-8")
+        except OSError as e:
+            messagebox.showerror(APP, f"Could not save:\n{e}")
+            return
+        self.win.destroy()
 
 
 class SettingsDialog:
@@ -441,8 +516,16 @@ class SettingsDialog:
         self.o_model = self._row(f, 20, "Ollama model", cfg.get("ollama_model") or sm.DEFAULT_OLLAMA_MODEL)
         ttk.Label(f, text="\"API model\" is used with the Online API address and key above.", foreground="#666").grid(row=21, column=0, columnspan=3, sticky="w", padx=6)
 
+        ttk.Label(f, text="Transcript quality", font=("Segoe UI", 10, "bold")).grid(row=22, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ttk.Label(f, text="Clean up").grid(row=23, column=0, sticky="w", padx=6, pady=3)
+        self.clean_var = tk.StringVar(value=CLEAN_ENGINES.get(cfg.get("clean_engine"), CLEAN_ENGINES["off"]))
+        ttk.Combobox(f, textvariable=self.clean_var, values=list(CLEAN_ENGINES.values()), state="readonly", width=20).grid(row=23, column=1, sticky="w", padx=6)
+        ttk.Button(f, text="Vocabulary...", command=lambda: VocabularyEditor(self.win)).grid(row=23, column=2, sticky="e", padx=6)
+        ttk.Label(f, text="Clean up: Claude fixes capitals, punctuation and misheard terms (original kept).",
+                  foreground="#666").grid(row=24, column=0, columnspan=3, sticky="w", padx=6)
+
         b = ttk.Frame(f)
-        b.grid(row=22, column=0, columnspan=3, sticky="e", pady=(12, 0))
+        b.grid(row=25, column=0, columnspan=3, sticky="e", pady=(12, 0))
         ttk.Button(b, text="Save", command=self.save).grid(row=0, column=0, padx=4)
         ttk.Button(b, text="Cancel", command=w.destroy).grid(row=0, column=1)
 
@@ -487,7 +570,8 @@ class SettingsDialog:
                         api_url=self.a_url.get().strip(), api_model=self.a_model.get().strip(),
                         my_name=self.my_name.get().strip(), claude_model=self.c_model.get().strip(),
                         notes_model=self.n_model.get().strip(), ollama_url=self.o_url.get().strip(),
-                        ollama_model=self.o_model.get().strip())
+                        ollama_model=self.o_model.get().strip(),
+                        clean_engine=next((k for k, v in CLEAN_ENGINES.items() if v == self.clean_var.get()), "off"))
         secret_set(self.cfg, "server_key", self.s_key.get().strip())
         secret_set(self.cfg, "api_key", self.a_key.get().strip())
         secret_set(self.cfg, "claude_key", self.c_key.get().strip())
@@ -721,6 +805,11 @@ class App:
             return
         if cfg["notes_engine"] != "off" and not self._notes_ready(cfg):
             cfg["notes_engine"] = "off"  # still make the transcript
+        clean = cfg.get("clean_engine", "off")
+        if (clean == "claude" and not secret_get(cfg, "claude_key")) or \
+                (clean == "server_claude" and not secret_get(cfg, "server_key")):
+            messagebox.showinfo(APP, "Clean up: set the Claude key or server key in Settings first.")
+            cfg["clean_engine"] = "off"
         self.t_queue.put((session_dir, cfg, "all"))
         if not self.t_busy:
             self.t_status.set("Transcript queued...")
@@ -738,6 +827,14 @@ class App:
                 if mode == "all":
                     out = run_transcript(cfg, session_dir, progress, self.t_cancel.is_set, loaded)
                     msg = f"Transcript saved: {out}"
+                    if cfg.get("clean_engine", "off") != "off":
+                        try:
+                            kept = run_clean(cfg, session_dir, progress, self.t_cancel.is_set)
+                            msg = "Transcript saved and cleaned" + (f" ({kept} lines left as heard)" if kept else "")
+                        except (tr.Cancelled, sm.Cancelled):
+                            raise
+                        except Exception as e:
+                            msg = f"Transcript saved, cleanup failed: {e}"
                 if cfg.get("notes_engine", "off") != "off":
                     try:
                         notes = run_notes(cfg, session_dir, progress, self.t_cancel.is_set)

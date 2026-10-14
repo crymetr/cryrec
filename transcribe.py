@@ -156,23 +156,25 @@ class LocalEngine:
             threads = max(1, (os.cpu_count() or 4) // 2)
             self.model = WhisperModel(path, device="cpu", compute_type="int8", cpu_threads=threads)
 
-    def segments(self, audio, lang, on_progress, cancel):
+    def segments(self, audio, lang, on_progress, cancel, terms=(), mic=False):
         segs, _info = self.model.transcribe(
             audio,
             language=None if lang in (None, "mixed") else lang,
             multilingual=lang == "mixed",
             beam_size=5,
             vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 500},
+            # the mic also picks up the remote voice faintly (speakers, bone-conduction headsets): be stricter there
+            vad_parameters={"min_silence_duration_ms": 500, "threshold": 0.6 if mic else 0.5},
             condition_on_previous_text=False,
             hallucination_silence_threshold=2.0,
-            word_timestamps=True,  # needed by hallucination_silence_threshold
+            word_timestamps=True,  # needed by hallucination_silence_threshold and for splitting
+            hotwords=hotword_prompt(terms),  # sent with every 30 s window, unlike initial_prompt
         )
         for s in segs:
             if cancel():
                 raise Cancelled()
             on_progress(s.end)
-            yield s.start, s.end, s.text
+            yield from split_on_pauses(s)
 
 
 class ApiEngine:
@@ -186,7 +188,7 @@ class ApiEngine:
         self.model = model
         self.device = "api"
 
-    def segments(self, audio, lang, on_progress, cancel):
+    def segments(self, audio, lang, on_progress, cancel, terms=(), mic=False):
         step = self.CHUNK_SEC * SAMPLE_RATE
         for off in range(0, len(audio), step):
             if cancel():
@@ -197,6 +199,8 @@ class ApiEngine:
             fields = {"model": self.model, "response_format": "verbose_json", "timestamp_granularities[]": "segment"}
             if lang in ("tr", "en"):
                 fields["language"] = lang
+            if terms:
+                fields["prompt"] = hotword_prompt(terms)  # Whisper APIs take vocabulary as the prompt
             data = self._post(fields, encode_mp3(chunk, 64))  # 10 min at 64 kbps is ~5 MB
             t0 = off / SAMPLE_RATE
             segs = data.get("segments") or []
@@ -223,6 +227,77 @@ class ApiEngine:
             raise RuntimeError(f"API error {e.code}: {e.read()[:300].decode(errors='replace')}") from None
 
 
+PAUSE_SPLIT_SEC = 1.0
+MAX_HOTWORD_CHARS = 600  # Whisper's prompt holds ~220 tokens; keep room for the audio context
+
+
+def parse_vocabulary(text):
+    """Vocabulary lines: "Term" (spelling hint) or "wrong -> right" (fixed after transcription).
+    Lines starting with # are comments. Returns (terms, [(regex, right), ...])."""
+    import re
+    terms, fixes = [], []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "->" in line:
+            wrong, right = (p.strip() for p in line.split("->", 1))
+            if wrong and right:
+                fixes.append((re.compile(rf"(?<!\w){re.escape(wrong)}(?!\w)", re.IGNORECASE), right))
+                if right not in terms:
+                    terms.append(right)
+        elif line not in terms:
+            terms.append(line)
+    return terms, fixes
+
+
+def hotword_prompt(terms):
+    """A short, properly cased and punctuated hint: steers spelling, and a little the casing too."""
+    if not terms:
+        return None
+    out, size = [], 0
+    for t in terms:
+        if size + len(t) + 2 > MAX_HOTWORD_CHARS:
+            break
+        out.append(t)
+        size += len(t) + 2
+    return "Glossary: " + ", ".join(out) + "."
+
+
+def split_on_pauses(seg):
+    """Whisper can glue 40+ s into one segment; cut it where the words pause so turns interleave correctly."""
+    words = getattr(seg, "words", None)
+    if not words:
+        yield seg.start, seg.end, seg.text
+        return
+    cur = [words[0]]
+    for w in words[1:]:
+        if w.start - cur[-1].end > PAUSE_SPLIT_SEC:
+            yield cur[0].start, cur[-1].end, "".join(x.word for x in cur)
+            cur = []
+        cur.append(w)
+    yield cur[0].start, cur[-1].end, "".join(x.word for x in cur)
+
+
+def collapse_repeats(text):
+    """ "No problem. No problem. No problem." -> "No problem."  Mhm x14 -> "Mhm." (Whisper loops on quiet audio)."""
+    import re
+    # the same 1-5 word phrase three or more times in a row
+    pattern = re.compile(r"(\b(?:\w+[\s,.!?-]*){1,5}?)(?:\1){2,}", re.IGNORECASE)
+    text = text.strip() + " "  # so the last repeat matches like the others
+    prev = None
+    while prev != text:
+        prev = text
+        text = pattern.sub(r"\1", text)
+    return re.sub(r"\s{2,}", " ", text).strip()
+
+
+def apply_fixes(text, fixes):
+    for rx, right in fixes:
+        text = rx.sub(right, text)
+    return text
+
+
 def encode_mp3(audio, kbps=32):
     """16 kHz mono float32 -> small MP3 bytes (plenty for speech recognition)."""
     import lameenc
@@ -235,8 +310,10 @@ def encode_mp3(audio, kbps=32):
     return bytes(enc.encode(pcm) + enc.flush())
 
 
-def transcribe_session(session_dir, engine, language, progress, cancel):
-    """Write transcript.txt and transcript.srt into session_dir. Returns the txt path."""
+def transcribe_session(session_dir, engine, language, progress, cancel, vocabulary=""):
+    """Write transcript.txt and transcript.srt into session_dir. Returns the txt path.
+    vocabulary: text in the parse_vocabulary format (spelling hints and wrong -> right fixes)."""
+    terms, fixes = parse_vocabulary(vocabulary)
     session_dir = Path(session_dir)
     tracks = find_tracks(session_dir)
     if not tracks:
@@ -254,8 +331,8 @@ def transcribe_session(session_dir, engine, language, progress, cancel):
 
         def on_progress(t, ti=ti, label=label, dur=dur):
             progress((ti + min(1.0, t / dur)) / len(tracks), f"Transcribing {label}{where} {fmt_ts(t)} / {fmt_ts(dur)}")
-        for start, end, text in engine.segments(audio, lang, on_progress, cancel):
-            text = text.strip()
+        for start, end, text in engine.segments(audio, lang, on_progress, cancel, terms=terms, mic=label == "Me"):
+            text = apply_fixes(collapse_repeats(text.strip()), fixes)
             if text:
                 segments.append({"start": start, "end": end, "who": label, "text": text})
     segments = drop_bleed(segments)
@@ -269,8 +346,9 @@ def transcribe_session(session_dir, engine, language, progress, cancel):
 MAX_UPLOAD = 95 * 1024 * 1024  # Cloudflare and most proxies cap a request at 100 MB
 
 
-def remote_transcribe(session_dir, url, key, language, progress, cancel):
-    """Send the tracks to a CryRec server (see server/) and save the transcript it returns."""
+def remote_transcribe(session_dir, url, key, language, progress, cancel, vocabulary=""):
+    """Send the tracks to a CryRec server (see server/) and save the transcript it returns.
+    The server merges `vocabulary` with its own list."""
     session_dir = Path(session_dir)
     tracks = find_tracks(session_dir)
     if not tracks:
@@ -288,6 +366,8 @@ def remote_transcribe(session_dir, url, key, language, progress, cancel):
             z.writestr(f"{stem}.mp3", encode_mp3(audio, kbps))
             if cancel():
                 raise Cancelled()
+        if vocabulary.strip():
+            z.writestr("vocab.txt", vocabulary)
     del audios
     body = buf.getvalue()
     if len(body) > MAX_UPLOAD:

@@ -21,7 +21,12 @@ class Cancelled(Exception):
     pass
 
 
-def _system(my_name, language):
+def _glossary_line(glossary):
+    return ("Correct spellings of names and terms that may appear (misheard versions should be read as these): "
+            + ", ".join(glossary) + ".\n") if glossary else ""
+
+
+def _system(my_name, language, glossary=()):
     me = (f'"Me" is {my_name}, who recorded the meeting. In the notes, write "{my_name}" instead of "Me".'
           if my_name else '"Me" is the person who recorded the meeting.')
     lang = f"Write the notes in {language}." if language else "Write the notes in the main language of the meeting."
@@ -30,7 +35,7 @@ def _system(my_name, language):
 The transcript has lines like "[hh:mm:ss] Me: ..." and "[hh:mm:ss] Them: ...". {me}
 "Them" is everyone on the other side of the call; it can be several people. Use real names only when the transcript says them; otherwise write "Them".
 The transcript comes from speech recognition, so expect some misheard words. Do not invent facts, numbers, owners or dates that are not in the transcript.
-{lang} Use short sentences and everyday words.
+{_glossary_line(glossary)}{lang} Use short sentences and everyday words.
 
 Answer with Markdown only, using exactly these sections:
 
@@ -82,8 +87,8 @@ class _ChunkedNotes:
     def _ask(self, system, user, cancel):
         raise NotImplementedError
 
-    def notes(self, transcript, my_name, language, progress, cancel):
-        system = _system(my_name, language)
+    def notes(self, transcript, my_name, language, progress, cancel, glossary=()):
+        system = _system(my_name, language, glossary)
         chunks = chunk_transcript(transcript, self.max_chars)
         if len(chunks) == 1:
             progress(0.1, "Writing notes...")
@@ -104,13 +109,19 @@ class ClaudeNotes:
         self.key = key
         self.model = model or DEFAULT_CLAUDE_MODEL
 
-    def notes(self, transcript, my_name, language, progress, cancel):
+    def notes(self, transcript, my_name, language, progress, cancel, glossary=()):
+        progress(0.1, f"Writing notes with {self.model}...")
+        text, stop = self.ask(_system(my_name, language, glossary), _user(transcript), cancel, effort="medium")
+        if stop == "max_tokens":
+            text += "\n\n(Notes were cut off at the length limit.)"
+        return text
+
+    def ask(self, system, user, cancel, effort="medium", max_tokens=16000):
+        """One streamed request. Returns (text, stop_reason)."""
         import anthropic
         client = anthropic.Anthropic(api_key=self.key, max_retries=3)
-        req = dict(model=self.model, max_tokens=16000, system=_system(my_name, language),
-                   messages=[{"role": "user", "content": _user(transcript)}],
-                   output_config={"effort": "medium"})
-        progress(0.1, f"Writing notes with {self.model}...")
+        req = dict(model=self.model, max_tokens=max_tokens, system=system,
+                   messages=[{"role": "user", "content": user}], output_config={"effort": effort})
         try:
             if self.model.startswith("claude-haiku"):  # Haiku has no server-side fallback
                 stream = client.messages.stream(**req)
@@ -132,11 +143,47 @@ class ClaudeNotes:
         except anthropic.APIConnectionError:
             raise RuntimeError("Could not reach the Claude API.") from None
         if msg.stop_reason == "refusal":
-            raise RuntimeError("Claude declined to summarize this transcript.")
-        text = "".join(b.text for b in msg.content if b.type == "text").strip()
-        if msg.stop_reason == "max_tokens":
-            text += "\n\n(Notes were cut off at the length limit.)"
-        return text
+            raise RuntimeError("Claude declined this request.")
+        return "".join(b.text for b in msg.content if b.type == "text").strip(), msg.stop_reason
+
+
+CLEAN_LINES = 150
+_PREFIX = __import__("re").compile(r"^\[\d\d:\d\d:\d\d\] [^:]{1,40}:")
+
+
+def _clean_system(glossary):
+    return f"""You fix speech-recognition errors in a meeting transcript.
+Each line looks like "[hh:mm:ss] Speaker: text". Return every line in the same order, with exactly the same "[hh:mm:ss] Speaker:" start.
+Only fix capital letters, punctuation, and words that were clearly misheard. {_glossary_line(glossary)}
+Do not summarize, shorten, translate, reorder, merge or split lines, and do not add anything. Keep filler words and repetitions that are really there.
+Answer with the corrected lines only, nothing before or after."""
+
+
+def clean_transcript(text, ask, glossary, progress, cancel):
+    """Fix casing, punctuation and misheard terms line by line. ask(system, user) -> str.
+    A chunk whose answer doesn't line up (count or timestamps/speakers) keeps its original lines."""
+    lines = text.splitlines()
+    first = next((i for i, l in enumerate(lines) if _PREFIX.match(l)), len(lines))
+    header, body = lines[:first], lines[first:]
+    out, kept = [], 0
+    chunks = [body[i:i + CLEAN_LINES] for i in range(0, len(body), CLEAN_LINES)]
+    for n, chunk in enumerate(chunks):
+        if cancel():
+            raise Cancelled()
+        progress(n / max(1, len(chunks)), f"Cleaning transcript, part {n + 1} of {len(chunks)}...")
+        try:
+            answer = [l for l in ask(_clean_system(glossary), "\n".join(chunk)).splitlines() if l.strip()]
+        except Cancelled:
+            raise
+        except Exception:
+            answer = []
+        def head(line):
+            m = _PREFIX.match(line)
+            return m.group(0) if m else line
+        ok = len(answer) == len(chunk) and all(head(a) == head(c) for a, c in zip(answer, chunk))
+        out.extend(answer if ok else chunk)
+        kept += 0 if ok else len(chunk)
+    return "\n".join(header + out) + "\n", kept
 
 
 class OpenAINotes(_ChunkedNotes):
@@ -181,15 +228,25 @@ class OllamaNotes(_ChunkedNotes):
             raise RuntimeError(f"Could not reach Ollama at {self.url}: {e.reason}") from None
 
 
-def remote_notes(url, key, transcript, backend, language, my_name, progress, cancel):
+def remote_notes(url, key, transcript, backend, language, my_name, progress, cancel, vocabulary=""):
     """Ask a CryRec server for notes. backend: "local" (its Ollama) or "claude" (its Anthropic key)."""
+    return _remote_job(url, key, "/notes", {"transcript": transcript, "backend": backend, "language": language or "",
+                                            "my_name": my_name or "", "vocabulary": vocabulary}, "md", progress, cancel)
+
+
+def remote_clean(url, key, transcript, progress, cancel, vocabulary=""):
+    """Ask a CryRec server to clean a transcript with its Claude key. Returns (text, lines_kept_unchanged)."""
+    out = _remote_job(url, key, "/clean", {"transcript": transcript, "vocabulary": vocabulary},
+                      ("txt", "kept"), progress, cancel)
+    return out[0], out[1]
+
+
+def _remote_job(url, key, path, payload, result, progress, cancel):
     import time
-    import urllib.parse
     from transcribe import _server_call
     url = url.rstrip("/")
-    q = urllib.parse.urlencode({"backend": backend, "language": language or "", "my_name": my_name or ""})
-    job_id = _server_call(f"{url}/notes?{q}", key, data=transcript.encode("utf-8"),
-                          content_type="text/plain; charset=utf-8")["id"]
+    job_id = _server_call(f"{url}{path}", key, data=json.dumps(payload).encode("utf-8"),
+                          content_type="application/json")["id"]
     while True:
         if cancel():
             try:
@@ -199,7 +256,7 @@ def remote_notes(url, key, transcript, backend, language, my_name, progress, can
             raise Cancelled()
         st = _server_call(f"{url}/jobs/{job_id}", key)
         if st["status"] == "done":
-            return st["md"]
+            return tuple(st[k] for k in result) if isinstance(result, tuple) else st[result]
         if st["status"] == "failed":
             raise RuntimeError(f"Server: {st.get('error')}")
         progress(st.get("progress", 0.0), "Server: " + (st.get("text") or st["status"]))

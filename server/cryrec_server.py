@@ -10,8 +10,11 @@ device (auto|cuda|cpu), models_dir, jobs_dir, keep_hours, log_file.
 API (all need "Authorization: Bearer <key>"):
     GET    /health            {ok, version, model, device}
     POST   /jobs?language=&name=   body = zip with me.mp3 / them.mp3 (or meeting.mp3) -> {id}
-    POST   /notes?backend=local|claude&language=&my_name=   body = transcript text -> {id}
-    GET    /jobs/<id>         {status: queued|running|done|failed, progress, text, txt, srt | md, error}
+    POST   /notes             JSON {transcript, backend: local|claude, language, my_name, vocabulary} -> {id}
+    POST   /clean             JSON {transcript, vocabulary} -> {id}   (Claude fixes casing/punctuation/terms)
+    GET    /jobs/<id>         {status: queued|running|done|failed, progress, text, error,
+                               txt+srt (transcript) | md (notes) | txt+kept (clean)}
+A zip may also carry vocab.txt; it is merged with the server's vocabulary_file.
     DELETE /jobs/<id>         cancel
 Audio is deleted as soon as a job finishes; transcripts are kept keep_hours for the client to fetch.
 """
@@ -39,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import summarize as sm  # noqa: E402
 import transcribe as tr  # noqa: E402
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 APPDATA = Path(os.environ.get("APPDATA", Path.home())) / "CryRec"
 LOCALAPPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "CryRec"
 DEFAULTS = {
@@ -57,7 +60,10 @@ DEFAULTS = {
     "ollama_ctx": 8192,
     "anthropic_api_key": "",
     "claude_model": sm.DEFAULT_CLAUDE_MODEL,
+    # terms and "wrong -> right" fixes used for every job, merged with the client's own list
+    "vocabulary_file": str(APPDATA / "vocabulary.txt"),
 }
+MAX_VOCAB = 64 * 1024
 MAX_NOTES_BODY = 5 * 1024 * 1024
 MAX_BODY = 300 * 1024 * 1024
 TRACK_NAME = re.compile(r"^(me|them|meeting)\.(mp3|flac|wav|ogg|opus|m4a)$")
@@ -89,11 +95,20 @@ class Jobs:
         threading.Thread(target=self._worker, daemon=True).start()
         threading.Thread(target=self._janitor, daemon=True).start()
 
+    def vocabulary(self, client_vocab=""):
+        """Server list first, then the client's; parse_vocabulary drops duplicate terms."""
+        try:
+            server_vocab = Path(self.cfg["vocabulary_file"]).read_text(encoding="utf-8")
+        except (OSError, KeyError):
+            server_vocab = ""
+        return server_vocab + "\n" + (client_vocab or "")
+
     def add(self, body, language, name):
         job_id = uuid.uuid4().hex
         safe = re.sub(r"[^\w\- ]", "_", name or "meeting")[:80] or "meeting"
         d = self.root / job_id / safe
         d.mkdir(parents=True)
+        vocab = ""
         try:
             with zipfile.ZipFile(io.BytesIO(body)) as z:
                 names = [n for n in z.namelist() if TRACK_NAME.match(n)]
@@ -101,10 +116,12 @@ class Jobs:
                     raise ValueError("zip has no me/them/meeting audio")
                 for n in names:  # exact allow-listed names only, no paths
                     (d / n).write_bytes(z.read(n))
+                if "vocab.txt" in z.namelist():
+                    vocab = z.read("vocab.txt")[:MAX_VOCAB].decode("utf-8", errors="replace")
         except Exception:
             shutil.rmtree(d.parent, ignore_errors=True)
             raise
-        job = {"id": job_id, "dir": d, "language": language or "Auto", "status": "queued",
+        job = {"id": job_id, "dir": d, "language": language or "Auto", "status": "queued", "vocab": vocab,
                "progress": 0.0, "text": "waiting", "created": time.time(), "cancel": threading.Event()}
         with self.lock:
             self.jobs[job_id] = job
@@ -112,32 +129,41 @@ class Jobs:
         log(f"job {job_id[:8]} queued ({safe}, {sum((d / n).stat().st_size for n in names) / 1e6:.1f} MB)")
         return job_id
 
-    def add_notes(self, transcript, backend, language, my_name):
-        if backend not in ("local", "claude"):
-            raise ValueError("backend must be local or claude")
+    def add_text_job(self, kind, transcript, vocabulary="", backend="claude", language=None, my_name=""):
+        """kind "notes" (backend local|claude) or "clean" (always claude)."""
+        if backend not in ("local", "claude") or (kind == "clean" and backend != "claude"):
+            raise ValueError("backend must be local or claude (clean: claude only)")
         if backend == "claude" and not self.cfg.get("anthropic_api_key"):
             raise ValueError("this server has no Anthropic API key")
         job_id = uuid.uuid4().hex
-        job = {"id": job_id, "kind": "notes", "transcript": transcript, "backend": backend, "language": language,
-               "my_name": my_name, "status": "queued", "progress": 0.0, "text": "waiting",
-               "created": time.time(), "cancel": threading.Event()}
+        job = {"id": job_id, "kind": kind, "transcript": transcript, "backend": backend, "language": language,
+               "my_name": my_name, "vocab": (vocabulary or "")[:MAX_VOCAB], "status": "queued", "progress": 0.0,
+               "text": "waiting", "created": time.time(), "cancel": threading.Event()}
         with self.lock:
             self.jobs[job_id] = job
         self.q.put(job_id)
-        log(f"notes {job_id[:8]} queued ({backend}, {len(transcript) / 1000:.0f}k chars)")
+        log(f"{kind} {job_id[:8]} queued ({backend}, {len(transcript) / 1000:.0f}k chars)")
         return job_id
 
     def get(self, job_id):
         with self.lock:
             return self.jobs.get(job_id)
 
-    def _run_notes(self, job):
+    def _run_text_job(self, job):
+        glossary, _ = tr.parse_vocabulary(self.vocabulary(job.get("vocab")))
+        prog = lambda f, t: job.update(progress=f, text=t)  # noqa: E731
+        claude = sm.ClaudeNotes(self.cfg["anthropic_api_key"], self.cfg["claude_model"])
+        if job["kind"] == "clean":
+            job["txt"], job["kept"] = sm.clean_transcript(
+                job.pop("transcript"), lambda s, u: claude.ask(s, u, job["cancel"].is_set, effort="low")[0],
+                glossary, prog, job["cancel"].is_set)
+            return
         if job["backend"] == "local":
             eng = sm.OllamaNotes(self.cfg["ollama_url"], self.cfg["ollama_model"], int(self.cfg["ollama_ctx"]))
         else:
-            eng = sm.ClaudeNotes(self.cfg["anthropic_api_key"], self.cfg["claude_model"])
-        job["md"] = eng.notes(job.pop("transcript"), job["my_name"], job["language"],
-                              lambda f, t: job.update(progress=f, text=t), job["cancel"].is_set)
+            eng = claude
+        job["md"] = eng.notes(job.pop("transcript"), job["my_name"], job["language"], prog,
+                              job["cancel"].is_set, glossary)
 
     def _worker(self):
         engine = None
@@ -147,21 +173,21 @@ class Jobs:
             if not job or job["cancel"].is_set():
                 continue
             t0 = time.time()
-            if job.get("kind") == "notes":
-                job["status"], job["text"] = "running", "writing notes"
+            if job.get("kind") in ("notes", "clean"):
+                job["status"], job["text"] = "running", "working on the transcript"
                 if job["backend"] == "local" and engine is not None:
                     engine = None  # free Whisper's GPU memory for the local LLM
                     self.device = "idle"
                     gc.collect()
                 try:
-                    self._run_notes(job)
+                    self._run_text_job(job)
                     job["status"], job["progress"] = "done", 1.0
-                    log(f"notes {job_id[:8]} done in {time.time() - t0:.0f}s ({job['backend']})")
+                    log(f"{job['kind']} {job_id[:8]} done in {time.time() - t0:.0f}s ({job['backend']})")
                 except (tr.Cancelled, sm.Cancelled):
                     job["status"], job["error"] = "failed", "cancelled"
                 except Exception as e:
                     job["status"], job["error"] = "failed", str(e)
-                    log(f"notes {job_id[:8]} failed: {e!r}")
+                    log(f"{job['kind']} {job_id[:8]} failed: {e!r}")
                 job.pop("transcript", None)
                 continue
             job["status"], job["text"] = "running", "loading speech model"
@@ -174,7 +200,8 @@ class Jobs:
                     self.device = engine.device
                     log(f"model {self.cfg['model']} loaded on {engine.device}")
                 out = tr.transcribe_session(job["dir"], engine, job["language"],
-                                            lambda f, t: job.update(progress=f, text=t), job["cancel"].is_set)
+                                            lambda f, t: job.update(progress=f, text=t), job["cancel"].is_set,
+                                            self.vocabulary(job.get("vocab")))
                 job["txt"] = out.read_text(encoding="utf-8")
                 job["srt"] = (job["dir"] / "transcript.srt").read_text(encoding="utf-8")
                 job["status"], job["progress"] = "done", 1.0
@@ -243,6 +270,8 @@ def make_handler(cfg, jobs):
             if job["status"] == "done":
                 if job.get("kind") == "notes":
                     out["md"] = job["md"]
+                elif job.get("kind") == "clean":
+                    out.update(txt=job["txt"], kept=job["kept"])
                 else:
                     out.update(txt=job["txt"], srt=job["srt"])
             self._send(200, out)
@@ -252,14 +281,23 @@ def make_handler(cfg, jobs):
                 return
             u = urlparse(self.path)
             q = parse_qs(u.query)
-            if u.path == "/notes":
+            if u.path in ("/notes", "/clean"):
                 n = int(self.headers.get("Content-Length") or 0)
                 if not 0 < n <= MAX_NOTES_BODY:
                     return self._send(413, {"error": "body missing or too large"})
-                text = self.rfile.read(n).decode("utf-8", errors="replace")
+                raw = self.rfile.read(n).decode("utf-8", errors="replace")
+                if self.headers.get("Content-Type", "").startswith("application/json"):
+                    try:
+                        p = json.loads(raw)
+                    except ValueError:
+                        return self._send(400, {"error": "bad JSON"})
+                else:  # 0.4 clients: transcript as plain text, options in the query
+                    p = {"transcript": raw, **{k: v[0] for k, v in q.items()}}
                 try:
-                    job_id = jobs.add_notes(text, q.get("backend", ["local"])[0], q.get("language", ["English"])[0] or None,
-                                            q.get("my_name", [""])[0])
+                    job_id = jobs.add_text_job(
+                        u.path.strip("/"), str(p.get("transcript", "")), str(p.get("vocabulary", "")),
+                        p.get("backend", "claude" if u.path == "/clean" else "local"),
+                        p.get("language") or None, str(p.get("my_name", "")))
                 except ValueError as e:
                     return self._send(400, {"error": str(e)})
                 return self._send(200, {"id": job_id})
