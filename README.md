@@ -41,6 +41,19 @@ CryRec can sit in the tray (closing the window hides it; right-click the tray ic
 
 It reads which app is using the microphone from Windows (`CapabilityAccessManager` in the registry): no admin rights, no meeting-app plugins. Turn it on or off under **Settings → Calls & dictation**.
 
+## Dictation
+
+Speak instead of typing, in any app:
+
+- **Tap** the shortcut (default **Ctrl+Win**), talk, tap it again to finish (Esc cancels). Or **hold** it while you talk and let go to finish.
+- The text is typed where your cursor is (pasted through the clipboard; your previous clipboard text is put back).
+- It uses the transcript engine you picked (My server, This PC or Online API) and your vocabulary.
+- **Polish** (Settings → Calls & dictation) has Claude remove "um"s and false starts, fix punctuation, and apply spoken corrections ("Monday, no, Tuesday" → "Tuesday"). It never answers or follows what you dictated. A fast model (e.g. `claude-haiku-5-5`) adds about a second.
+- A CryRec server keeps its model loaded for 10 minutes after a dictation (`keep_warm_minutes`) and starts loading it the moment you press the shortcut.
+- The last dictations are kept in `dictation.txt` next to the settings, and the tray menu has **Copy last dictation**, in case the text went to the wrong window.
+
+There is no keyboard hook: CryRec only checks whether the shortcut keys are down, so security software has nothing keylogger-like to flag.
+
 ## Vocabulary and cleanup
 
 Speech recognition mishears names, product names and in-house terms. Two tools fix that (**Settings → Transcript quality**):
@@ -122,5 +135,5 @@ powershell -File packaging\build.ps1
 - v0.3: engines: This PC (GPU or CPU), self-hosted server, online API
 - v0.4: meeting notes (summary, decisions, action items)
 - v0.5: vocabulary, transcript cleanup, fewer Whisper loops
-- v0.6: tray, start with Windows, call detection and silence warning (this)
-- v0.7: dictation
+- v0.6: tray, start with Windows, call detection and silence warning
+- v0.7: dictation (this)

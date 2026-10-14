@@ -156,6 +156,14 @@ class LocalEngine:
             threads = max(1, (os.cpu_count() or 4) // 2)
             self.model = WhisperModel(path, device="cpu", compute_type="int8", cpu_threads=threads)
 
+    def quick_text(self, audio, lang, terms=()):
+        """Dictation: short clip, greedy decoding, no word timing. Several times faster than segments()."""
+        segs, _info = self.model.transcribe(
+            audio, language=None if lang in (None, "mixed") else lang, beam_size=1,
+            vad_filter=True, vad_parameters={"min_silence_duration_ms": 500},
+            condition_on_previous_text=False, without_timestamps=True, hotwords=hotword_prompt(terms))
+        return " ".join(s.text.strip() for s in segs)
+
     def segments(self, audio, lang, on_progress, cancel, terms=(), mic=False):
         segs, _info = self.model.transcribe(
             audio,
@@ -394,6 +402,23 @@ def remote_transcribe(session_dir, url, key, language, progress, cancel, vocabul
         except Exception:
             pass
         raise
+
+
+def remote_dictate(url, key, audio, language, polish, model, vocabulary=""):
+    """Short 16 kHz clip -> {"text", "raw", "polished"} from a CryRec server, in one request."""
+    import base64
+    body = json.dumps({"audio_b64": base64.b64encode(encode_mp3(audio, 64)).decode(), "ext": "mp3",
+                       "language": language, "polish": bool(polish), "model": model or "",
+                       "vocabulary": vocabulary or ""}).encode()
+    return _server_call(url.rstrip("/") + "/dictate", key, data=body, content_type="application/json")
+
+
+def server_warm(url, key):
+    """Ask the server to load its model now; fire and forget when the dictation key goes down."""
+    try:
+        _server_call(url.rstrip("/") + "/warm", key, data=b"{}", content_type="application/json")
+    except Exception:
+        pass
 
 
 def server_health(url, key):

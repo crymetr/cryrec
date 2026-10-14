@@ -34,11 +34,12 @@ import soundfile as sf
 import soxr
 
 import callwatch
+import dictate
 import summarize as sm
 import transcribe as tr
 
 APP = "CryRec"
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -64,6 +65,7 @@ MUTEX_NAME = "CryRec-singleton-A38983BB-4076-4045-A6FA-5273C2036256"
 MODELS_DIR = (APP_DIR / "models") if PORTABLE else Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP / "models"
 ENGINES = {"local": "This PC", "server": "My server", "api": "Online API"}
 CLEAN_ENGINES = {"off": "Off", "claude": "Claude", "server_claude": "My server (Claude)"}
+POLISH_MODES = {"auto": "Auto", "off": "Off", "claude": "Claude", "server_claude": "My server (Claude)"}
 NOTES_ENGINES = {"off": "Off", "claude": "Claude", "openai": "OpenAI-compatible", "ollama": "Ollama (local)",
                  "server_local": "My server (local)", "server_claude": "My server (Claude)"}
 DEFAULT_API_URL = "https://api.groq.com/openai/v1"
@@ -437,6 +439,151 @@ def run_notes(cfg, session_dir, progress, cancel):
     return sm.write_notes(session_dir, md)
 
 
+DICTATION_LOG = CONFIG_DIR / "dictation.txt"
+
+
+def run_dictation(cfg, audio, cache):
+    """16 kHz clip -> finished text, with the transcript engine and polish chosen in cfg."""
+    vocab = load_vocabulary()
+    terms, fixes = tr.parse_vocabulary(vocab)
+    language = cfg.get("language", "Auto")
+    polish = cfg.get("dictation_polish", "auto")
+    model = cfg.get("polish_model") or cfg.get("claude_model") or sm.DEFAULT_CLAUDE_MODEL
+    claude_key = secret_get(cfg, "claude_key")
+    if cfg.get("engine") == "server":
+        r = tr.remote_dictate(cfg.get("server_url", ""), secret_get(cfg, "server_key"), audio, language,
+                              polish in ("auto", "server_claude"), model, vocab)
+        if polish == "claude" and claude_key and r.get("raw"):
+            return sm.polish_dictation(r["raw"], sm.ClaudeNotes(claude_key, model), terms)
+        return r.get("text", "")
+    if cfg.get("engine") == "api":
+        eng = tr.ApiEngine(cfg.get("api_url") or DEFAULT_API_URL, secret_get(cfg, "api_key"),
+                           cfg.get("api_model") or DEFAULT_API_MODEL)
+    else:
+        key = (cfg.get("model", "turbo"), "auto" if cfg.get("use_gpu", True) else "cpu")
+        if key not in cache:
+            cache.clear()
+            cache[key] = tr.LocalEngine(MODELS_DIR, key[0], key[1])
+        eng = cache[key]
+    lang = tr.LANGUAGES.get(language, language)
+    if hasattr(eng, "quick_text"):
+        raw = eng.quick_text(audio, lang, terms)
+    else:
+        raw = " ".join(t.strip() for _, _, t in eng.segments(audio, lang, lambda t: None, lambda: False, terms=terms))
+    raw = tr.apply_fixes(tr.collapse_repeats(raw), fixes).strip()
+    if raw and polish in ("auto", "claude") and claude_key:
+        return sm.polish_dictation(raw, sm.ClaudeNotes(claude_key, model), terms)
+    return raw
+
+
+class DictationUI:
+    """Shortcut -> record -> transcribe (+ polish) -> paste, with a small overlay that never takes focus."""
+
+    def __init__(self, app):
+        self.app, self.root = app, app.root
+        self.watcher = self.rec = None
+        self.target = None
+        self.cache = {}
+        self.last_text = ""
+        w = self.win = tk.Toplevel(self.root)
+        w.overrideredirect(True)
+        w.configure(bg="#1f2430")
+        self.msg = tk.StringVar()
+        tk.Label(w, textvariable=self.msg, bg="#1f2430", fg="#ffffff", font=("Segoe UI", 11),
+                 padx=18, pady=10).pack()
+        w.withdraw()
+        self.hwnd = None
+        self.restart()
+
+    def restart(self):
+        if self.watcher:
+            self.watcher.stop()
+            self.watcher = None
+        cfg = self.app.cfg
+        if cfg.get("dictation_enabled", True):
+            self.hotkey = cfg.get("dictation_hotkey", "Ctrl+Win")
+            self.watcher = dictate.HotkeyWatcher(self.hotkey, self._start, self._mode, self._stop, self._cancel)
+
+    # overlay (UI thread only)
+    def _show(self, text, hide_after=None):
+        def do():
+            self.msg.set(text)
+            w = self.win
+            if self.hwnd is None:
+                w.deiconify()
+                self.hwnd = dictate.make_no_activate(w)
+            w.update_idletasks()
+            x = (w.winfo_screenwidth() - w.winfo_reqwidth()) // 2
+            y = w.winfo_screenheight() - w.winfo_reqheight() - 110
+            w.geometry(f"+{x}+{y}")
+            w.attributes("-topmost", True)
+            dictate.show_no_activate(self.hwnd, True)
+            if hide_after:
+                self.root.after(int(hide_after * 1000), lambda: self._hide_if(text))
+        self.root.after(0, do)
+
+    def _hide(self):
+        self.root.after(0, lambda: self.hwnd and dictate.show_no_activate(self.hwnd, False))
+
+    def _hide_if(self, text):
+        if self.msg.get() == text and self.hwnd:
+            dictate.show_no_activate(self.hwnd, False)
+
+    # watcher callbacks (watcher thread)
+    def _start(self):
+        self.target = dictate.foreground_window()
+        cfg = self.app.cfg
+        if cfg.get("engine") == "server" and cfg.get("server_url"):
+            threading.Thread(target=tr.server_warm, args=(cfg["server_url"], secret_get(cfg, "server_key")),
+                             daemon=True).start()
+        try:
+            self.rec = dictate.Recorder(self.app.pa, self.app.dictation_device())
+            self._show("●  Listening...")
+        except Exception as e:
+            self.rec = None
+            self._show(f"Dictation: no microphone ({e})", hide_after=3)
+
+    def _mode(self, mode):
+        if not self.rec:
+            return
+        self._show(f"●  Listening. Press {self.hotkey} to finish, Esc to cancel." if mode == "tap"
+                   else "●  Listening. Release to finish.")
+
+    def _cancel(self):
+        if self.rec:
+            self.rec.stop()
+            self.rec = None
+        self._hide()
+
+    def _stop(self):
+        if not self.rec:
+            return
+        audio, self.rec = self.rec.stop(), None
+        if len(audio) < dictate.MIN_SEC * 16000 or float(np.abs(audio).max(initial=0)) < 0.01:
+            self._hide()
+            return
+        self._show("✎  Writing...")
+        threading.Thread(target=self._process, args=(audio, self.target), daemon=True).start()
+
+    def _process(self, audio, target):
+        try:
+            text = run_dictation(dict(self.app.cfg), audio, self.cache)
+        except Exception as e:
+            self._show(f"Dictation failed: {e}"[:120], hide_after=5)
+            return
+        if not text:
+            self._show("Nothing heard.", hide_after=2)
+            return
+        self.last_text = text
+        try:
+            with open(DICTATION_LOG, "a", encoding="utf-8") as f:
+                f.write(f"[{datetime.now():%Y-%m-%d %H:%M}] {text}\n")
+        except OSError:
+            pass
+        self._hide()
+        dictate.paste_text(text, target)
+
+
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 SHOW_FLAG = CONFIG_DIR / "show.flag"  # a second launch drops this so the running copy shows its window
 SILENCE_LEVEL = 0.02  # peak level under which a track counts as silent
@@ -575,8 +722,9 @@ class VocabularyEditor:
 class SettingsDialog:
     """Where transcripts are made: GPU use for This PC, your own server, or an online API."""
 
-    def __init__(self, parent, cfg):
+    def __init__(self, parent, cfg, on_save=None):
         self.cfg = cfg
+        self.on_save = on_save
         w = self.win = tk.Toplevel(parent)
         w.title(f"{APP} settings")
         w.resizable(False, False)
@@ -653,7 +801,24 @@ class SettingsDialog:
         ttk.Label(fc, text="When a call ends or nothing is heard for that long, CryRec asks and then stops\n"
                            "by itself after 30 seconds. It never records without asking.",
                   foreground="#666").grid(row=4, column=0, columnspan=3, sticky="w", padx=6)
-        self.calls_next_row = 5
+
+        ttk.Label(fc, text="Dictation", font=("Segoe UI", 10, "bold")).grid(row=5, column=0, columnspan=3, sticky="w", pady=(12, 0))
+        self.dict_on = tk.BooleanVar(value=cfg.get("dictation_enabled", True))
+        ttk.Checkbutton(fc, text="Dictation shortcut: speak, and the text is typed where the cursor is",
+                        variable=self.dict_on).grid(row=6, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Label(fc, text="Shortcut").grid(row=7, column=0, sticky="w", **pad)
+        self.dict_key = tk.StringVar(value=cfg.get("dictation_hotkey", "Ctrl+Win"))
+        ttk.Combobox(fc, textvariable=self.dict_key, values=list(dictate.HOTKEYS), state="readonly", width=14).grid(row=7, column=1, sticky="w", padx=6)
+        ttk.Label(fc, text="Polish").grid(row=8, column=0, sticky="w", **pad)
+        self.polish = tk.StringVar(value=POLISH_MODES.get(cfg.get("dictation_polish"), POLISH_MODES["auto"]))
+        ttk.Combobox(fc, textvariable=self.polish, values=list(POLISH_MODES.values()), state="readonly", width=20).grid(row=8, column=1, sticky="w", padx=6)
+        self.polish_model = self._row(fc, 10, "Polish model", cfg.get("polish_model") or cfg.get("claude_model") or sm.DEFAULT_CLAUDE_MODEL)
+        ttk.Label(fc, text="Tap the shortcut to start and again to stop (Esc cancels), or hold it while you talk.\n"
+                           "Polish: Claude removes \"um\"s and fixes punctuation (Auto: via your server when\n"
+                           "the transcript engine is My server, else with your Claude key). Faster models\n"
+                           "(claude-haiku-5-5) add about 1 s, Opus about 2 s. Uses the mic\n"
+                           "picked in the main window, or the Windows default.",
+                  foreground="#666").grid(row=11, column=0, columnspan=3, sticky="w", padx=6)
 
         b = ttk.Frame(outer)
         b.grid(row=1, column=0, sticky="e", pady=(10, 0))
@@ -703,7 +868,10 @@ class SettingsDialog:
                         notes_model=self.n_model.get().strip(), ollama_url=self.o_url.get().strip(),
                         ollama_model=self.o_model.get().strip(),
                         clean_engine=next((k for k, v in CLEAN_ENGINES.items() if v == self.clean_var.get()), "off"),
-                        watch_calls=self.watch.get(), silence_minutes=_int(self.silence.get(), 5, 0, 60))
+                        watch_calls=self.watch.get(), silence_minutes=_int(self.silence.get(), 5, 0, 60),
+                        dictation_enabled=self.dict_on.get(), dictation_hotkey=self.dict_key.get(),
+                        dictation_polish=next((k for k, v in POLISH_MODES.items() if v == self.polish.get()), "auto"),
+                        polish_model=self.polish_model.get().strip())
         if self.autostart.get() != autostart_enabled():
             set_autostart(self.autostart.get())
         secret_set(self.cfg, "server_key", self.s_key.get().strip())
@@ -711,6 +879,8 @@ class SettingsDialog:
         secret_set(self.cfg, "claude_key", self.c_key.get().strip())
         save_config(self.cfg)
         self.win.destroy()
+        if self.on_save:
+            self.on_save()
 
 
 class App:
@@ -835,6 +1005,7 @@ class App:
         root.protocol("WM_DELETE_WINDOW", self.hide_or_quit)
         root.after(2000, self._poll_calls)
         root.after(1000, self._poll_show_flag)
+        self.dictation = DictationUI(self)
         if self.hidden:
             root.withdraw()
         elif not self.cfg.get("asked_autostart"):
@@ -894,6 +1065,17 @@ class App:
         if self.recording:
             self.stop()
 
+    def dictation_device(self):
+        """The mic picked in the main window, or the Windows default microphone."""
+        dev = self.inputs.get(self.in_var.get())
+        if dev:
+            return dev
+        return self.pa.get_default_wasapi_device(d_in=True)
+
+    def copy_last_dictation(self):
+        if self.dictation.last_text:
+            dictate.set_clipboard_text(self.dictation.last_text)
+
     # ---------- window and tray ----------
     def _setup_tray(self):
         try:
@@ -909,6 +1091,7 @@ class App:
             pystray.MenuItem("Open CryRec", on_ui(self.show), default=True),
             pystray.MenuItem(lambda item: "Stop recording" if self.recording else "Start recording",
                              on_ui(self.toggle)),
+            pystray.MenuItem("Copy last dictation", on_ui(self.copy_last_dictation)),
             pystray.MenuItem("Quit", on_ui(self.quit)))
         self.tray = pystray.Icon(APP, img, APP, menu)
         self.tray.run_detached()
@@ -1032,7 +1215,7 @@ class App:
             self.t_queue.put((Path(d), cfg, "notes"))
 
     def open_settings(self):
-        SettingsDialog(self.root, self.cfg)
+        SettingsDialog(self.root, self.cfg, on_save=lambda: self.dictation.restart())
 
     def transcribe_clicked(self):
         if self.t_busy:

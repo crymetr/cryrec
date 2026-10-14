@@ -12,6 +12,10 @@ API (all need "Authorization: Bearer <key>"):
     POST   /jobs?language=&name=   body = zip with me.mp3 / them.mp3 (or meeting.mp3) -> {id}
     POST   /notes             JSON {transcript, backend: local|claude, language, my_name, vocabulary} -> {id}
     POST   /clean             JSON {transcript, vocabulary} -> {id}   (Claude fixes casing/punctuation/terms)
+    POST   /dictate           JSON {audio_b64, ext, language, polish, model, vocabulary} -> {text, raw}
+                              (answers on the same request; jumps the queue; keeps the model warm
+                               keep_warm_minutes after use)
+    POST   /warm              load the model now (sent when the dictation key goes down)
     GET    /jobs/<id>         {status: queued|running|done|failed, progress, text, error,
                                txt+srt (transcript) | md (notes) | txt+kept (clean)}
 A zip may also carry vocab.txt; it is merged with the server's vocabulary_file.
@@ -20,6 +24,7 @@ Audio is deleted as soon as a job finishes; transcripts are kept keep_hours for 
 """
 
 import argparse
+import base64
 import gc
 import hmac
 import io
@@ -42,7 +47,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import summarize as sm  # noqa: E402
 import transcribe as tr  # noqa: E402
 
-VERSION = "0.5.0"
+VERSION = "0.7.0"
 APPDATA = Path(os.environ.get("APPDATA", Path.home())) / "CryRec"
 LOCALAPPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "CryRec"
 DEFAULTS = {
@@ -64,6 +69,7 @@ DEFAULTS = {
     "vocabulary_file": str(APPDATA / "vocabulary.txt"),
 }
 MAX_VOCAB = 64 * 1024
+MAX_DICTATE_BODY = 12 * 1024 * 1024
 MAX_NOTES_BODY = 5 * 1024 * 1024
 MAX_BODY = 300 * 1024 * 1024
 TRACK_NAME = re.compile(r"^(me|them|meeting)\.(mp3|flac|wav|ogg|opus|m4a)$")
@@ -89,11 +95,61 @@ class Jobs:
         self.root = Path(cfg["jobs_dir"])
         self.root.mkdir(parents=True, exist_ok=True)
         self.jobs = {}
-        self.q = queue.Queue()
+        self.q = queue.PriorityQueue()  # (priority, seq, job_id): dictation (0) goes before long jobs (1)
+        self.seq = 0
         self.lock = threading.Lock()
         self.device = "idle"
+        self.last_dictate = 0.0
         threading.Thread(target=self._worker, daemon=True).start()
         threading.Thread(target=self._janitor, daemon=True).start()
+
+    def _put(self, job_id, priority):
+        with self.lock:
+            self.seq += 1
+            seq = self.seq
+        self.q.put((priority, seq, job_id))
+
+    def add_dictate(self, audio, ext, language, polish, model, vocabulary):
+        """Short clip -> text, optionally polished by Claude. The caller waits on job["done"]."""
+        if polish and not self.cfg.get("anthropic_api_key"):
+            polish = False
+        job_id = uuid.uuid4().hex
+        job = {"id": job_id, "kind": "dictate", "audio": audio, "ext": ext, "language": language or "Auto",
+               "polish": polish, "model": model, "vocab": (vocabulary or "")[:MAX_VOCAB], "status": "queued",
+               "progress": 0.0, "text": "waiting", "created": time.time(), "cancel": threading.Event(),
+               "done": threading.Event()}
+        with self.lock:
+            self.jobs[job_id] = job
+        self._put(job_id, 0)
+        return job
+
+    def warm(self):
+        """Load the model now (if it isn't) so the dictation that follows is quick."""
+        self.last_dictate = time.time()
+        if self.device != "idle":
+            return
+        job_id = uuid.uuid4().hex
+        with self.lock:
+            self.jobs[job_id] = {"id": job_id, "kind": "warm", "created": time.time(), "status": "done",
+                                 "cancel": threading.Event()}
+        self._put(job_id, 0)
+
+    def _run_dictate(self, job, engine):
+        tmp = self.root / f"{job['id']}.{job['ext']}"
+        tmp.write_bytes(job.pop("audio"))
+        try:
+            audio = tr.load_audio(tmp)
+        finally:
+            tmp.unlink(missing_ok=True)
+        vocab = self.vocabulary(job.get("vocab"))
+        terms, fixes = tr.parse_vocabulary(vocab)
+        lang = tr.LANGUAGES.get(job["language"], job["language"])
+        raw = tr.apply_fixes(tr.collapse_repeats(engine.quick_text(audio, lang, terms)), fixes).strip()
+        text = raw
+        if job["polish"] and raw:
+            model = job["model"] if str(job.get("model", "")).startswith("claude-") else self.cfg["claude_model"]
+            text = sm.polish_dictation(raw, sm.ClaudeNotes(self.cfg["anthropic_api_key"], model), terms)
+        job["raw"], job["result"] = raw, text
 
     def vocabulary(self, client_vocab=""):
         """Server list first, then the client's; parse_vocabulary drops duplicate terms."""
@@ -125,7 +181,7 @@ class Jobs:
                "progress": 0.0, "text": "waiting", "created": time.time(), "cancel": threading.Event()}
         with self.lock:
             self.jobs[job_id] = job
-        self.q.put(job_id)
+        self._put(job_id, 1)
         log(f"job {job_id[:8]} queued ({safe}, {sum((d / n).stat().st_size for n in names) / 1e6:.1f} MB)")
         return job_id
 
@@ -141,7 +197,7 @@ class Jobs:
                "text": "waiting", "created": time.time(), "cancel": threading.Event()}
         with self.lock:
             self.jobs[job_id] = job
-        self.q.put(job_id)
+        self._put(job_id, 1)
         log(f"{kind} {job_id[:8]} queued ({backend}, {len(transcript) / 1000:.0f}k chars)")
         return job_id
 
@@ -165,11 +221,47 @@ class Jobs:
         job["md"] = eng.notes(job.pop("transcript"), job["my_name"], job["language"], prog,
                               job["cancel"].is_set, glossary)
 
+    def _load_engine(self, engine, job):
+        if not tr.model_ready(self.cfg["models_dir"], self.cfg["model"]):
+            tr.download_model(self.cfg["models_dir"], self.cfg["model"],
+                              lambda f, t: job.update(text=t), job["cancel"].is_set)
+        if engine is None:
+            engine = tr.LocalEngine(self.cfg["models_dir"], self.cfg["model"], self.cfg["device"])
+            self.device = engine.device
+            log(f"model {self.cfg['model']} loaded on {engine.device}")
+        return engine
+
     def _worker(self):
         engine = None
         while True:
-            job_id = self.q.get()
+            try:
+                _, _, job_id = self.q.get(timeout=30)
+            except queue.Empty:
+                engine = self._maybe_unload(engine)
+                continue
             job = self.get(job_id)
+            if job and job.get("kind") == "warm":  # someone pressed the dictation key: load now
+                try:
+                    engine = self._load_engine(engine, job)
+                except Exception as e:
+                    log(f"warm-up failed: {e!r}")
+                self.last_dictate = time.time()
+                continue
+            if job and job.get("kind") == "dictate":
+                t0 = time.time()
+                try:
+                    engine = self._load_engine(engine, job)
+                    self._run_dictate(job, engine)
+                    job["status"] = "done"
+                    log(f"dictate {job_id[:8]} done in {time.time() - t0:.1f}s ({len(job['result'])} chars"
+                        f"{', polished' if job['polish'] else ''})")
+                except Exception as e:
+                    job["status"], job["error"] = "failed", str(e)
+                    log(f"dictate {job_id[:8]} failed: {e!r}")
+                job.pop("audio", None)
+                self.last_dictate = time.time()
+                job["done"].set()
+                continue
             if not job or job["cancel"].is_set():
                 continue
             t0 = time.time()
@@ -192,13 +284,7 @@ class Jobs:
                 continue
             job["status"], job["text"] = "running", "loading speech model"
             try:
-                if not tr.model_ready(self.cfg["models_dir"], self.cfg["model"]):
-                    tr.download_model(self.cfg["models_dir"], self.cfg["model"],
-                                      lambda f, t: job.update(text=t), job["cancel"].is_set)
-                if engine is None:
-                    engine = tr.LocalEngine(self.cfg["models_dir"], self.cfg["model"], self.cfg["device"])
-                    self.device = engine.device
-                    log(f"model {self.cfg['model']} loaded on {engine.device}")
+                engine = self._load_engine(engine, job)
                 out = tr.transcribe_session(job["dir"], engine, job["language"],
                                             lambda f, t: job.update(progress=f, text=t), job["cancel"].is_set,
                                             self.vocabulary(job.get("vocab")))
@@ -213,10 +299,16 @@ class Jobs:
                 job["status"], job["error"] = "failed", str(e)
                 log(f"job {job_id[:8]} failed: {e!r}")
             shutil.rmtree(job["dir"].parent, ignore_errors=True)  # audio never stays on disk
-            if self.q.empty():
-                engine = None  # give the GPU memory back to whatever else runs here
-                self.device = "idle"
-                gc.collect()
+            engine = self._maybe_unload(engine)
+
+    def _maybe_unload(self, engine):
+        """Give the GPU memory back when idle, but stay loaded a while after dictation (it needs to be quick)."""
+        warm = float(self.cfg.get("keep_warm_minutes", 10)) * 60
+        if engine is not None and self.q.empty() and time.time() - self.last_dictate > warm:
+            self.device = "idle"
+            gc.collect()
+            return None
+        return engine
 
     def _janitor(self):
         while True:
@@ -281,6 +373,27 @@ def make_handler(cfg, jobs):
                 return
             u = urlparse(self.path)
             q = parse_qs(u.query)
+            if u.path == "/warm":
+                jobs.warm()
+                return self._send(200, {"ok": True, "device": jobs.device})
+            if u.path == "/dictate":
+                n = int(self.headers.get("Content-Length") or 0)
+                if not 0 < n <= MAX_DICTATE_BODY:
+                    return self._send(413, {"error": "body missing or too large"})
+                try:
+                    p = json.loads(self.rfile.read(n))
+                    audio = base64.b64decode(p["audio_b64"])
+                except (ValueError, KeyError):
+                    return self._send(400, {"error": "bad request"})
+                ext = p.get("ext") if p.get("ext") in ("mp3", "wav", "flac") else "mp3"
+                job = jobs.add_dictate(audio, ext, p.get("language"), bool(p.get("polish")), p.get("model"),
+                                       str(p.get("vocabulary", "")))
+                if not job["done"].wait(90):  # stay under proxy timeouts (Cloudflare: 100 s)
+                    job["cancel"].set()
+                    return self._send(504, {"error": "timed out"})
+                if job["status"] != "done":
+                    return self._send(500, {"error": job.get("error", "failed")})
+                return self._send(200, {"text": job["result"], "raw": job["raw"], "polished": job["polish"]})
             if u.path in ("/notes", "/clean"):
                 n = int(self.headers.get("Content-Length") or 0)
                 if not 0 < n <= MAX_NOTES_BODY:
