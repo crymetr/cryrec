@@ -76,6 +76,26 @@ TRACK_NAME = re.compile(r"^(me|them|meeting)\.(mp3|flac|wav|ogg|opus|m4a)$")
 
 
 LOG_FILE = None
+_gpu_cache = {"t": 0.0, "info": None}
+
+
+def gpu_info():
+    """NVIDIA power limit / draw / P-state for /health (watchdogs use it); None without an NVIDIA GPU."""
+    if time.time() - _gpu_cache["t"] < 30:
+        return _gpu_cache["info"]
+    info = None
+    try:
+        import subprocess
+        out = subprocess.run(["nvidia-smi", "--query-gpu=enforced.power.limit,power.draw,pstate,memory.used,memory.total",
+                              "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=10,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout.strip().splitlines()[0]
+        limit, draw, pstate, mem_used, mem_total = (x.strip() for x in out.split(","))
+        info = {"power_limit_w": float(limit), "power_w": float(draw), "pstate": pstate,
+                "mem_used_mb": int(mem_used), "mem_total_mb": int(mem_total)}
+    except Exception:
+        pass
+    _gpu_cache.update(t=time.time(), info=info)
+    return info
 
 
 def log(msg):
@@ -352,7 +372,7 @@ def make_handler(cfg, jobs):
                 return
             path = urlparse(self.path).path
             if path == "/health":
-                return self._send(200, {"ok": True, "version": VERSION, "model": cfg["model"], "device": jobs.device,
+                return self._send(200, {"ok": True, "version": VERSION, "model": cfg["model"], "device": jobs.device, "gpu": gpu_info(),
                                         "notes": {"local": bool(cfg.get("ollama_url")),
                                                   "claude": bool(cfg.get("anthropic_api_key"))}})
             job = jobs.get(self._job_id() or "")
