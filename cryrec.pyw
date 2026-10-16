@@ -42,7 +42,7 @@ import summarize as sm
 import transcribe as tr
 
 APP = "CryRec"
-VERSION = "0.8.0"
+VERSION = "0.8.1"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -872,10 +872,12 @@ class SettingsDialog:
         # ---- Notes
         n = tabs["notes"]
         self._section(n, "notes", "Meeting notes")
-        self.notes_lang = self._combo(n, "notes", "Write notes in", {k: k for k in sm.NOTES_LANGUAGES},
+        self.notes_engine = self._combo(n, "notes", "Write notes with", NOTES_ENGINES, cfg.get("notes_engine", "off"))
+        self._hint(n, "notes", "Default for every recording. Recent > ⋯ > Write notes with uses another one once.")
+        self.notes_lang = self._combo(n, "notes", "Language", {k: k for k in sm.NOTES_LANGUAGES},
                                       cfg.get("notes_language", "English"))
         self.my_name = self._entry(n, "notes", "Your name", cfg.get("my_name", ""))
-        self._hint(n, "notes", "Used instead of \"Me\" in action items. Pick the notes engine in the main window.")
+        self._hint(n, "notes", "Used instead of \"Me\" in action items.")
         self._section(n, "notes", "Cloud AI")
         self.c_key = self._entry(n, "notes", "API key", secret_get(cfg, "claude_key"), show="•")
         self._hint(n, "notes", "Only needed for \"Cloud AI\" on this PC. \"My server\" options use the server's key.")
@@ -1056,7 +1058,8 @@ class SettingsDialog:
             engine=engine, language=self._key(self.language), auto_transcribe=self.auto.get(),
             model=self._key(self.model), use_gpu=self.gpu.get(), server_url=url,
             api_url=self.a_url.get().strip(), api_model=self.a_model.get().strip(),
-            clean_engine=self._key(self.clean), notes_language=self._key(self.notes_lang),
+            clean_engine=self._key(self.clean), notes_engine=self._key(self.notes_engine),
+            notes_language=self._key(self.notes_lang),
             my_name=self.my_name.get().strip(), claude_model=self.c_model.get().strip(),
             notes_model=self.n_model.get().strip(), ollama_url=self.o_url.get().strip(),
             ollama_model=self.o_model.get().strip(), watch_calls=self.watch.get(),
@@ -1172,16 +1175,9 @@ class App:
         self.out_meter = LevelMeter(dev, self.theme, width=360)
         self.out_meter.grid(row=5, column=0, columnspan=3, sticky="ew")
 
-        # notes engine (the one choice people change per meeting)
-        nrow = ttk.Frame(frm)
-        nrow.grid(row=5, column=0, sticky="ew", pady=(px(14), 0))
-        nrow.columnconfigure(0, weight=1)
-        ttk.Label(nrow, text="Meeting notes", style="Strong.TLabel").grid(row=0, column=0, sticky="w")
-        self.notes_var = tk.StringVar(value=NOTES_ENGINES.get(self.cfg.get("notes_engine"), NOTES_ENGINES["off"]))
-        nb = ttk.Combobox(nrow, textvariable=self.notes_var, values=list(NOTES_ENGINES.values()), state="readonly",
-                          width=1)
-        nb.grid(row=1, column=0, sticky="ew", pady=(px(4), 0))
-        nb.bind("<<ComboboxSelected>>", lambda e: self._save_notes_choice())
+        # a picked device stays highlighted in a readonly ttk combobox; drop the highlight and the focus
+        for box in (self.in_box, self.out_box):
+            box.bind("<<ComboboxSelected>>", lambda e: (e.widget.selection_clear(), self.root.focus_set()))
 
         # recent recordings
         ttk.Separator(frm).grid(row=6, column=0, sticky="ew", pady=(px(16), px(10)))
@@ -1320,7 +1316,12 @@ class App:
             m.add_command(label="Cancel", command=lambda: self.cancel_one(d))
         else:
             m.add_command(label="Transcribe again", command=lambda: self.enqueue_transcript(d))
-            m.add_command(label="Write notes again", command=lambda: self.enqueue_notes(d),
+            notes_menu = tk.Menu(m, tearoff=False)
+            for key, label in NOTES_ENGINES.items():
+                if key != "off":
+                    notes_menu.add_command(label=label + ("  (default)" if key == self.cfg.get("notes_engine") else ""),
+                                           command=lambda k=key: self.enqueue_notes(d, engine=k))
+            m.add_cascade(label="Write notes with", menu=notes_menu,
                           state="normal" if (d / "transcript.txt").exists() else "disabled")
         m.add_separator()
         m.add_command(label="Open folder", command=lambda: os.startfile(d))
@@ -1503,12 +1504,7 @@ class App:
         os._exit(0)  # the installer / new exe needs this process gone
 
     # ---------- transcripts ----------
-    def _save_notes_choice(self):
-        self.cfg["notes_engine"] = next((k for k, v in NOTES_ENGINES.items() if v == self.notes_var.get()), "off")
-        save_config(self.cfg)
-
     def _transcript_settings(self):
-        self._save_notes_choice()
         return dict(self.cfg)
 
     def _notes_ready(self, cfg):
@@ -1534,10 +1530,13 @@ class App:
         if d:
             self.enqueue_notes(d)
 
-    def enqueue_notes(self, d):
+    def enqueue_notes(self, d, engine=None):
+        """engine overrides the default notes engine for this one recording (Recent > Write notes with)."""
         cfg = self._transcript_settings()
-        if cfg["notes_engine"] == "off":
-            messagebox.showinfo(APP, "Pick a notes engine next to \"Notes\" first.")
+        if engine:
+            cfg["notes_engine"] = engine
+        if cfg.get("notes_engine", "off") == "off":
+            messagebox.showinfo(APP, "Pick a notes engine in Settings > Notes first.")
             return
         if not (d / "transcript.txt").exists():
             messagebox.showwarning(APP, "This folder has no transcript yet. Transcribe it first.")
@@ -1548,7 +1547,6 @@ class App:
     def open_settings(self):
         def saved():
             self.theme.set_mode(self.cfg.get("theme", "system"))
-            self.notes_var.set(NOTES_ENGINES.get(self.cfg.get("notes_engine"), NOTES_ENGINES["off"]))
             self.dictation.restart()
             self.refresh_recent(force=True)
         SettingsDialog(self.root, self.cfg, self.theme, on_save=saved)
