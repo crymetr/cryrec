@@ -1,6 +1,8 @@
 # CryRec
 
-Small Windows meeting recorder. Pick a mic and a speaker, press Record.
+Windows meeting recorder. Pick a mic and a speaker, press Record. CryRec saves both sides, writes a transcript with who said what, can write meeting notes, offers to record when a Teams/Zoom/Webex call starts, and does dictation in any app.
+
+Windows 10/11 only (it records system audio through WASAPI loopback).
 
 ## Install
 
@@ -45,7 +47,7 @@ It reads which app is using the microphone from Windows (`CapabilityAccessManage
 
 Speak instead of typing, in any app:
 
-- **Tap** the shortcut (default **Ctrl+Win**), talk, tap it again to finish (Esc cancels). Or **hold** it while you talk and let go to finish.
+- **Tap** the shortcut (default **Ctrl+Win**; Ctrl+Alt and Right Ctrl are the other choices), talk, tap it again to finish (Esc cancels). Or **hold** it while you talk and let go to finish.
 - The text is typed where your cursor is (pasted through the clipboard; your previous clipboard text is put back).
 - It uses the transcript engine you picked (My server, This PC or Online API) and your vocabulary.
 - **Polish** (Settings → Calls & dictation) has Claude remove "um"s and false starts, fix punctuation, and apply spoken corrections ("Monday, no, Tuesday" → "Tuesday"). It never answers or follows what you dictated. A fast model (e.g. `claude-haiku-5-5`) adds about a second.
@@ -56,7 +58,7 @@ There is no keyboard hook: CryRec only checks whether the shortcut keys are down
 
 ## Vocabulary and cleanup
 
-Speech recognition mishears names, product names and in-house terms. Two tools fix that (**Settings → Transcript quality**):
+Speech recognition mishears names, product names and in-house terms. Two tools fix that (**Settings → Transcript** tab):
 
 - **Vocabulary...**: one name or term per line (`Power BI`, `Alex Chen`). These go to Whisper as spelling hints with every 30-second window, and to the notes prompt. A line like `power pi -> Power BI` also replaces that phrase after transcription, for words that still come out wrong. Keep the left side to phrases that never occur as normal words (a fix like `well -> Wells` would also change every "well"). The file is `vocabulary.txt` next to the settings. A CryRec server can keep its own list too (`vocabulary_file` in `server.json`); it is merged with each client's list, so every PC that uses the server benefits.
 - **Clean up** (off by default): Claude fixes capitals, punctuation and misheard terms line by line, using the vocabulary. Timestamps and speakers are checked after each part; a part that doesn't line up keeps its original lines. The original stays as `transcript.raw.txt`. About $0.25 to $0.50 per 1.5-hour meeting, depending on the model.
@@ -91,7 +93,15 @@ python server/cryrec_server.py            # listens on 127.0.0.1:8765
 
 For meeting notes the server can use a local Ollama (`ollama_url`, `ollama_model`, `ollama_ctx` in `server.json`) and, if you add `anthropic_api_key` (and optionally `claude_model`), Claude. Before a local notes job it unloads Whisper so both fit on a small GPU.
 
-The server only listens on localhost. Put HTTPS in front of it (Cloudflare Tunnel, Tailscale, a reverse proxy), then in CryRec on each client choose **My server** and enter the address and key under **Settings**. Audio is deleted right after each job, and transcripts are dropped after 24 hours. The model is loaded per batch of jobs and released afterwards, so the GPU stays free for other work. Uploads are MP3 at up to 64 kbps, which fits about 3 hours of meeting into one 95 MB request.
+The server only listens on localhost. Put HTTPS in front of it (Cloudflare Tunnel, Tailscale, a reverse proxy), then in CryRec on each client choose **My server** and enter the address and key under **Settings**.
+
+- Audio is deleted right after each job; finished transcripts and notes are dropped after 24 hours (`keep_hours`).
+- The model is loaded when work comes in and released when the queue is empty, so the GPU stays free for other work. After a dictation it stays loaded for `keep_warm_minutes` (10) so the next one is quick, and dictation jumps ahead of long meeting jobs.
+- Uploads are MP3, 64 kbps per track for meetings up to about 1.5 hours. Longer meetings get a lower bitrate (down to 16 kbps), so one 95 MB upload holds up to about 6 hours.
+- `vocabulary_file` (default `%APPDATA%\CryRec\vocabulary.txt`) is merged with each client's vocabulary.
+- `/health` also reports the NVIDIA power limit and P-state, handy for an outside watchdog.
+
+The API is documented at the top of `server/cryrec_server.py`.
 
 ## Updates
 
@@ -104,8 +114,9 @@ Each recording gets its own folder under the save location (installed: `Document
 - `meeting.mp3`: mic and speaker mixed together
 - `me.flac`: mic only
 - `them.flac`: speaker only (the other people)
-
-The split tracks are kept for the transcript feature (who said what).
+- `transcript.txt` and `transcript.srt`: the transcript (the split tracks are what make Me / Them reliable)
+- `transcript.raw.txt`: the transcript before Clean up, when Clean up is on
+- `notes.md`: meeting notes, when a notes engine is picked
 
 ## Develop
 
