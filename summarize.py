@@ -110,7 +110,7 @@ class ClaudeNotes:
         self.model = model or DEFAULT_CLAUDE_MODEL
 
     def notes(self, transcript, my_name, language, progress, cancel, glossary=()):
-        progress(0.1, f"Writing notes with {self.model}...")
+        progress(0.1, "Writing notes...")
         text, stop = self.ask(_system(my_name, language, glossary), _user(transcript), cancel, effort="medium")
         if stop == "max_tokens":
             text += "\n\n(Notes were cut off at the length limit.)"
@@ -133,17 +133,17 @@ class ClaudeNotes:
                         raise Cancelled()
                 msg = s.get_final_message()
         except anthropic.AuthenticationError:
-            raise RuntimeError("Claude rejected the API key.") from None
+            raise RuntimeError("The cloud AI rejected the API key.") from None
         except anthropic.NotFoundError:
-            raise RuntimeError(f"Claude model '{self.model}' not found.") from None
+            raise RuntimeError(f"Cloud AI model '{self.model}' not found.") from None
         except anthropic.RateLimitError:
-            raise RuntimeError("Claude rate limit or credit limit reached. Try again later.") from None
+            raise RuntimeError("Cloud AI rate or credit limit reached. Try again later.") from None
         except anthropic.APIStatusError as e:
-            raise RuntimeError(f"Claude API error {e.status_code}: {e.message}") from None
+            raise RuntimeError(f"Cloud AI error {e.status_code}: {e.message}") from None
         except anthropic.APIConnectionError:
-            raise RuntimeError("Could not reach the Claude API.") from None
+            raise RuntimeError("Could not reach the cloud AI.") from None
         if msg.stop_reason == "refusal":
-            raise RuntimeError("Claude declined this request.")
+            raise RuntimeError("The cloud AI declined this request.")
         return "".join(b.text for b in msg.content if b.type == "text").strip(), msg.stop_reason
 
 

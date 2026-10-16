@@ -50,7 +50,7 @@ Speak instead of typing, in any app:
 - **Tap** the shortcut (default **Ctrl+Win**; Ctrl+Alt and Right Ctrl are the other choices), talk, tap it again to finish (Esc cancels). Or **hold** it while you talk and let go to finish.
 - The text is typed where your cursor is (pasted through the clipboard; your previous clipboard text is put back).
 - It uses the transcript engine you picked (My server, This PC or Online API) and your vocabulary.
-- **Polish** (Settings → Calls & dictation) has Claude remove "um"s and false starts, fix punctuation, and apply spoken corrections ("Monday, no, Tuesday" → "Tuesday"). It never answers or follows what you dictated. A fast model (e.g. `claude-haiku-5-5`) adds about a second.
+- **Polish** (Settings → Calls & dictation) has the cloud AI remove "um"s and false starts, fix punctuation, and apply spoken corrections ("Monday, no, Tuesday" → "Tuesday"). It never answers or follows what you dictated. A faster model (set under Settings > Notes > advanced) adds less time.
 - A CryRec server keeps its model loaded for 10 minutes after a dictation (`keep_warm_minutes`) and starts loading it the moment you press the shortcut.
 - The last dictations are kept in `dictation.txt` next to the settings, and the tray menu has **Copy last dictation**, in case the text went to the wrong window.
 
@@ -61,7 +61,7 @@ There is no keyboard hook: CryRec only checks whether the shortcut keys are down
 Speech recognition mishears names, product names and in-house terms. Two tools fix that (**Settings → Transcript** tab):
 
 - **Vocabulary...**: one name or term per line (`Power BI`, `Alex Chen`). These go to Whisper as spelling hints with every 30-second window, and to the notes prompt. A line like `power pi -> Power BI` also replaces that phrase after transcription, for words that still come out wrong. Keep the left side to phrases that never occur as normal words (a fix like `well -> Wells` would also change every "well"). The file is `vocabulary.txt` next to the settings. A CryRec server can keep its own list too (`vocabulary_file` in `server.json`); it is merged with each client's list, so every PC that uses the server benefits.
-- **Clean up** (off by default): Claude fixes capitals, punctuation and misheard terms line by line, using the vocabulary. Timestamps and speakers are checked after each part; a part that doesn't line up keeps its original lines. The original stays as `transcript.raw.txt`. About $0.25 to $0.50 per 1.5-hour meeting, depending on the model.
+- **Clean up** (off by default): the cloud AI fixes capitals, punctuation and misheard terms line by line, using the vocabulary. Timestamps and speakers are checked after each part; a part that doesn't line up keeps its original lines. The original stays as `transcript.raw.txt`. About $0.25 to $0.50 per 1.5-hour meeting, depending on the model.
 
 Also built in: long Whisper segments are split where the speaker pauses (so turns stay in order), repeated filler loops ("Mhm. Mhm. Mhm.") are collapsed, and the mic track uses a stricter speech threshold, because headsets and speakers leak the other side's voice into the mic.
 
@@ -71,10 +71,10 @@ With a notes engine picked next to "Notes", CryRec also writes `notes.md` after 
 
 | Notes engine | What it does |
 |---|---|
-| **Claude** | Anthropic API with your key (default model `claude-opus-5-5`, change it in Settings). Whole meeting in one request. |
+| **Cloud AI** | A cloud language model with your own API key (the Anthropic Messages API; model under Settings > Notes > advanced). Whole meeting in one request. |
 | **OpenAI-compatible** | Any `/chat/completions` API, using the Online API address and key plus the "API model" setting. |
 | **Ollama (local)** | A model on your own machine through Ollama (default `gemma3:4b`). Long meetings are split into parts and merged. |
-| **My server (local / Claude)** | Your CryRec server writes the notes with its own Ollama or its own Anthropic key. |
+| **My server (local AI / cloud AI)** | Your CryRec server writes the notes with its own Ollama or its own cloud AI key. |
 
 Set **Your name** in Settings so action items say your name instead of "Me". Notes are written in English by default; Turkish or the meeting's own language are options. Small local models make a good first draft but sometimes give a task to the wrong person; read action items before you send them on.
 
@@ -147,4 +147,5 @@ powershell -File packaging\build.ps1
 - v0.4: meeting notes (summary, decisions, action items)
 - v0.5: vocabulary, transcript cleanup, fewer Whisper loops
 - v0.6: tray, start with Windows, call detection and silence warning
-- v0.7: dictation (this)
+- v0.7: dictation
+- v0.8: new look: Windows 11 style, light/dark follows Windows, sharp at any display scaling, Recent recordings list (this)

@@ -246,3 +246,14 @@ def make_no_activate(tk_window):
 
 def show_no_activate(hwnd, show=True):
     user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE if show else SW_HIDE)
+
+
+HWND_TOPMOST = wintypes.HWND(-1)
+SWP_NOACTIVATE, SWP_SHOWWINDOW = 0x0010, 0x0040
+user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                ctypes.c_int, wintypes.UINT]
+
+
+def place_no_activate(hwnd, x, y, w, h):
+    """Move, size, show and keep on top in one call, without ever activating the window."""
+    user32.SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW)

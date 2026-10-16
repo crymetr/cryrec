@@ -9,6 +9,7 @@ Portable mode: if a file named "portable" sits next to the exe, settings live th
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -34,12 +35,14 @@ import soundfile as sf
 import soxr
 
 import callwatch
+from ui_theme import (THEME_MODES, LevelMeter, PillButton, Theme, Tooltip, enable_dpi_awareness,
+                      work_area)
 import dictate
 import summarize as sm
 import transcribe as tr
 
 APP = "CryRec"
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -64,10 +67,11 @@ UPDATE_DIR = (APP_DIR / "updates") if PORTABLE else Path(os.environ.get("LOCALAP
 MUTEX_NAME = "CryRec-singleton-A38983BB-4076-4045-A6FA-5273C2036256"
 MODELS_DIR = (APP_DIR / "models") if PORTABLE else Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP / "models"
 ENGINES = {"local": "This PC", "server": "My server", "api": "Online API"}
-CLEAN_ENGINES = {"off": "Off", "claude": "Claude", "server_claude": "My server (Claude)"}
-POLISH_MODES = {"auto": "Auto", "off": "Off", "claude": "Claude", "server_claude": "My server (Claude)"}
-NOTES_ENGINES = {"off": "Off", "claude": "Claude", "openai": "OpenAI-compatible", "ollama": "Ollama (local)",
-                 "server_local": "My server (local)", "server_claude": "My server (Claude)"}
+CLEAN_ENGINES = {"off": "Off", "claude": "Cloud AI", "server_claude": "My server (cloud AI)"}
+POLISH_MODES = {"auto": "Auto", "off": "Off", "claude": "Cloud AI", "server_claude": "My server (cloud AI)"}
+NOTES_ENGINES = {"off": "Off", "claude": "Cloud AI", "openai": "OpenAI-compatible API",
+                 "ollama": "Ollama (local)", "server_local": "My server (local AI)",
+                 "server_claude": "My server (cloud AI)"}
 DEFAULT_API_URL = "https://api.groq.com/openai/v1"
 DEFAULT_API_MODEL = "whisper-large-v3-turbo"
 
@@ -485,15 +489,43 @@ class DictationUI:
         self.target = None
         self.cache = {}
         self.last_text = ""
+        # rounded pill: the window's own background is a colour key made fully transparent
+        key = "#010203"
         w = self.win = tk.Toplevel(self.root)
-        w.overrideredirect(True)
-        w.configure(bg="#1f2430")
-        self.msg = tk.StringVar()
-        tk.Label(w, textvariable=self.msg, bg="#1f2430", fg="#ffffff", font=("Segoe UI", 11),
-                 padx=18, pady=10).pack()
         w.withdraw()
-        self.hwnd = None
+        w.overrideredirect(True)
+        w.configure(bg=key)
+        w.attributes("-transparentcolor", key)
+        w.attributes("-topmost", True)
+        self.canvas = tk.Canvas(w, bg=key, highlightthickness=0, bd=0)
+        self.canvas.pack()
+        self.msg = tk.StringVar()
+        self.kind = "listen"
+        # set "never activate" before the window is ever shown, so even the first show can't take focus
+        self.hwnd = dictate.make_no_activate(w)
+        app.theme.on_change(lambda: self.msg.get() and self._draw())
         self.restart()
+
+    def _draw(self):
+        t = self.app.theme
+        px = t.px
+        text = self.msg.get()
+        f = t.fonts["body"]
+        h = px(42)
+        w = f.measure(text) + px(60)
+        c = self.canvas
+        c.delete("all")
+        c.config(width=w, height=h)
+        fill = t.c("overlay")
+        r = h // 2
+        c.create_oval(0, 0, h, h, fill=fill, outline=fill)
+        c.create_oval(w - h, 0, w, h, fill=fill, outline=fill)
+        c.create_rectangle(r, 0, w - r, h, fill=fill, outline=fill)
+        dot = {"listen": t.c("record"), "busy": t.c("accent"), "error": t.c("warn")}[self.kind]
+        d = px(10)
+        c.create_oval(px(18), (h - d) // 2, px(18) + d, (h + d) // 2, fill=dot, outline=dot)
+        c.create_text(px(38), h // 2, text=text, anchor="w", fill=t.c("overlay_text"), font=f)
+        return w, h
 
     def restart(self):
         if self.watcher:
@@ -505,19 +537,18 @@ class DictationUI:
             self.watcher = dictate.HotkeyWatcher(self.hotkey, self._start, self._mode, self._stop, self._cancel)
 
     # overlay (UI thread only)
-    def _show(self, text, hide_after=None):
+    def _show(self, text, hide_after=None, kind="listen"):
         def do():
             self.msg.set(text)
-            w = self.win
-            if self.hwnd is None:
-                w.deiconify()
-                self.hwnd = dictate.make_no_activate(w)
-            w.update_idletasks()
-            x = (w.winfo_screenwidth() - w.winfo_reqwidth()) // 2
-            y = w.winfo_screenheight() - w.winfo_reqheight() - 110
-            w.geometry(f"+{x}+{y}")
-            w.attributes("-topmost", True)
-            dictate.show_no_activate(self.hwnd, True)
+            self.kind = kind
+            w, h = self._draw()
+            px = self.app.theme.px
+            area = work_area() or (0, 0, self.win.winfo_screenwidth(), self.win.winfo_screenheight())
+            x = area[0] + (area[2] - area[0] - w) // 2
+            y = area[3] - h - px(40)
+            self.win.geometry(f"{w}x{h}+{x}+{y}")
+            self.win.update_idletasks()
+            dictate.place_no_activate(self.hwnd, x, y, w, h)
             if hide_after:
                 self.root.after(int(hide_after * 1000), lambda: self._hide_if(text))
         self.root.after(0, do)
@@ -538,16 +569,16 @@ class DictationUI:
                              daemon=True).start()
         try:
             self.rec = dictate.Recorder(self.app.pa, self.app.dictation_device())
-            self._show("●  Listening...")
-        except Exception as e:
+            self._show("Listening...")
+        except Exception:
             self.rec = None
-            self._show(f"Dictation: no microphone ({e})", hide_after=3)
+            self._show("No microphone found for dictation.", hide_after=3, kind="error")
 
     def _mode(self, mode):
         if not self.rec:
             return
-        self._show(f"●  Listening. Press {self.hotkey} to finish, Esc to cancel." if mode == "tap"
-                   else "●  Listening. Release to finish.")
+        self._show(f"Listening.  {self.hotkey} to finish, Esc to cancel" if mode == "tap"
+                   else "Listening.  Let go to finish")
 
     def _cancel(self):
         if self.rec:
@@ -562,17 +593,17 @@ class DictationUI:
         if len(audio) < dictate.MIN_SEC * 16000 or float(np.abs(audio).max(initial=0)) < 0.01:
             self._hide()
             return
-        self._show("✎  Writing...")
+        self._show("Writing...", kind="busy")
         threading.Thread(target=self._process, args=(audio, self.target), daemon=True).start()
 
     def _process(self, audio, target):
         try:
             text = run_dictation(dict(self.app.cfg), audio, self.cache)
         except Exception as e:
-            self._show(f"Dictation failed: {e}"[:120], hide_after=5)
+            self._show(f"Dictation failed: {e}"[:110], hide_after=5, kind="error")
             return
         if not text:
-            self._show("Nothing heard.", hide_after=2)
+            self._show("Nothing heard.", hide_after=2, kind="error")
             return
         self.last_text = text
         try:
@@ -628,11 +659,13 @@ def set_autostart(on):
 
 
 class Popup:
-    """Small always-on-top box in the bottom-right corner, with buttons and an optional countdown."""
+    """Small always-on-top box above the taskbar, bottom right, with buttons and an optional countdown."""
 
     def __init__(self, root, title, message, buttons, countdown=None, on_timeout=None, countdown_text="{s} s"):
         self.root, self.on_timeout, self.left = root, on_timeout, countdown
         self.countdown_text = countdown_text
+        theme = getattr(root, "cryrec_app", None) and root.cryrec_app.theme
+        px = theme.px if theme else (lambda n: n)
         w = self.win = tk.Toplevel(root)
         w.title(title)
         w.resizable(False, False)
@@ -641,19 +674,28 @@ class Popup:
             w.iconbitmap(str(RES_DIR / "cryrec.ico"))
         except tk.TclError:
             pass
-        f = ttk.Frame(w, padding=14)
+        if theme:
+            theme.register(w)
+        f = ttk.Frame(w, padding=(px(18), px(14)))
         f.grid()
-        ttk.Label(f, text=message, wraplength=320, font=("Segoe UI", 10)).grid(row=0, column=0, sticky="w")
+        ttk.Label(f, text=message, wraplength=px(320), justify="left",
+                  style="Strong.TLabel").grid(row=0, column=0, sticky="w")
         self.count = tk.StringVar()
-        ttk.Label(f, textvariable=self.count, foreground="#666").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(f, textvariable=self.count, style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(px(4), 0))
         b = ttk.Frame(f)
-        b.grid(row=2, column=0, sticky="e", pady=(10, 0))
+        b.grid(row=2, column=0, sticky="e", pady=(px(12), 0))
         for i, (label, fn) in enumerate(buttons):
-            ttk.Button(b, text=label, command=lambda fn=fn: self._click(fn)).grid(row=0, column=i, padx=(6 if i else 0, 0))
+            ttk.Button(b, text=label, style="Accent.TButton" if i == 0 else "TButton",
+                       command=lambda fn=fn: self._click(fn)).grid(row=0, column=i, padx=(px(8) if i else 0, 0))
         w.protocol("WM_DELETE_WINDOW", self.close)
         w.update_idletasks()
-        x = w.winfo_screenwidth() - w.winfo_reqwidth() - 24
-        y = w.winfo_screenheight() - w.winfo_reqheight() - 80
+        area = work_area()
+        if area:
+            x = area[2] - w.winfo_reqwidth() - px(16)
+            y = area[3] - w.winfo_reqheight() - px(16) - px(32)  # leave room for the caption bar
+        else:
+            x = w.winfo_screenwidth() - w.winfo_reqwidth() - px(24)
+            y = w.winfo_screenheight() - w.winfo_reqheight() - px(80)
         w.geometry(f"+{x}+{y}")
         w.bell()
         self.alive = True
@@ -685,151 +727,272 @@ class Popup:
 class VocabularyEditor:
     """Edit vocabulary.txt: names and terms, and "wrong -> right" fixes."""
 
-    def __init__(self, parent):
+    def __init__(self, parent, theme):
+        px = theme.px
         w = self.win = tk.Toplevel(parent)
         w.title(f"{APP} vocabulary")
         w.transient(parent)
-        w.grab_set()
-        f = ttk.Frame(w, padding=10)
+        theme.register(w)
+        f = ttk.Frame(w, padding=px(12))
         f.grid(sticky="nsew")
         w.columnconfigure(0, weight=1)
         w.rowconfigure(0, weight=1)
         f.columnconfigure(0, weight=1)
         f.rowconfigure(1, weight=1)
-        ttk.Label(f, text="One name or term per line. To fix a word that keeps coming out wrong: wrong -> right",
-                  foreground="#666").grid(row=0, column=0, sticky="w")
-        self.text = tk.Text(f, width=60, height=20, font=("Consolas", 10), undo=True)
-        self.text.grid(row=1, column=0, sticky="nsew", pady=6)
+        ttk.Label(f, text="One name or term per line. Fix a word that keeps coming out wrong with:  wrong -> right",
+                  style="Muted.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
+        self.text = tk.Text(f, width=60, height=18, font=("Consolas", 10), undo=True, relief="flat",
+                            bg=theme.c("field"), fg=theme.c("text"), insertbackground=theme.c("text"),
+                            selectbackground=theme.c("accent"), padx=px(8), pady=px(6),
+                            highlightthickness=1, highlightbackground=theme.c("border"),
+                            highlightcolor=theme.c("accent"))
+        self.text.grid(row=1, column=0, sticky="nsew", pady=px(8))
         sb = ttk.Scrollbar(f, command=self.text.yview)
-        sb.grid(row=1, column=1, sticky="ns", pady=6)
+        sb.grid(row=1, column=1, sticky="ns", pady=px(8))
         self.text.config(yscrollcommand=sb.set)
         self.text.insert("1.0", load_vocabulary() or VOCAB_TEMPLATE)
+
+        def recolor(t=theme):
+            if self.text.winfo_exists():
+                self.text.config(bg=t.c("field"), fg=t.c("text"), insertbackground=t.c("text"),
+                                 selectbackground=t.c("accent"), highlightbackground=t.c("border"),
+                                 highlightcolor=t.c("accent"))
+        theme.on_change(recolor)
         b = ttk.Frame(f)
         b.grid(row=2, column=0, columnspan=2, sticky="e")
-        ttk.Button(b, text="Save", command=self.save).grid(row=0, column=0, padx=4)
+        ttk.Button(b, text="Save", style="Accent.TButton", command=self.save).grid(row=0, column=0, padx=(0, px(6)))
         ttk.Button(b, text="Cancel", command=w.destroy).grid(row=0, column=1)
+        w.grab_set()
 
     def save(self):
         try:
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
             VOCAB_FILE.write_text(self.text.get("1.0", "end").rstrip() + "\n", encoding="utf-8")
         except OSError as e:
-            messagebox.showerror(APP, f"Could not save:\n{e}")
+            messagebox.showerror(APP, f"Could not save:\n{e}", parent=self.win)
             return
         self.win.destroy()
 
 
 class SettingsDialog:
-    """Where transcripts are made: GPU use for This PC, your own server, or an online API."""
+    """Four tabs: General, Transcript, Notes, Calls & dictation. Engine-specific fields show only when used."""
 
-    def __init__(self, parent, cfg, on_save=None):
-        self.cfg = cfg
-        self.on_save = on_save
+    def __init__(self, parent, cfg, theme, on_save=None):
+        self.cfg, self.theme, self.on_save = cfg, theme, on_save
+        px = theme.px
         w = self.win = tk.Toplevel(parent)
         w.title(f"{APP} settings")
         w.resizable(False, False)
         w.transient(parent)
-        w.grab_set()
-        outer = ttk.Frame(w, padding=10)
-        outer.grid()
-        nb = ttk.Notebook(outer)
-        nb.grid(row=0, column=0)
-        f = ttk.Frame(nb, padding=10)      # transcript
-        fn = ttk.Frame(nb, padding=10)     # notes and Claude
-        fc = ttk.Frame(nb, padding=10)     # calls and dictation
-        nb.add(f, text="Transcript")
-        nb.add(fn, text="Notes & Claude")
-        nb.add(fc, text="Calls & dictation")
-        self.calls_tab = fc
-        pad = {"padx": 6, "pady": 3}
+        try:
+            w.iconbitmap(str(RES_DIR / "cryrec.ico"))
+        except tk.TclError:
+            pass
+        theme.register(w)
+        outer = ttk.Frame(w, padding=px(12))
+        outer.grid(sticky="nsew")
+        nb = self.nb = ttk.Notebook(outer)
+        nb.grid(row=0, column=0, sticky="nsew")
+        tabs = {}
+        for key, title in (("general", "General"), ("transcript", "Transcript"), ("notes", "Notes"),
+                           ("calls", "Calls & dictation")):
+            f = ttk.Frame(nb, padding=(px(14), px(12)))
+            f.columnconfigure(1, weight=1)
+            nb.add(f, text=title)
+            tabs[key] = f
+        self.rows = {k: 0 for k in tabs}
 
-        ttk.Label(f, text="This PC", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
+        # ---- General
+        g = tabs["general"]
+        self._section(g, "general", "Recordings")
+        self.out_dir = tk.StringVar(value=cfg.get("out_dir", str(DEFAULT_OUT)))
+        row = self._next("general")
+        ttk.Label(g, text="Save to").grid(row=row, column=0, sticky="w", pady=px(3))
+        pick = ttk.Frame(g)
+        pick.grid(row=row, column=1, sticky="ew", padx=(px(10), 0))
+        pick.columnconfigure(0, weight=1)
+        ttk.Entry(pick, textvariable=self.out_dir).grid(row=0, column=0, sticky="ew")
+        ttk.Button(pick, text="Browse", command=self._browse).grid(row=0, column=1, padx=(px(6), 0))
+        self._section(g, "general", "Appearance")
+        self.theme_var = self._combo(g, "general", "Theme", THEME_MODES, cfg.get("theme", "system"))
+        self._section(g, "general", "Start-up")
+        self.autostart = self._check(g, "general", "Start CryRec with Windows (in the tray)", autostart_enabled())
+        self._section(g, "general", "Updates")
+        row = self._next("general")
+        ttk.Label(g, text=f"Version {VERSION}" + (" (portable)" if PORTABLE else "")).grid(row=row, column=0, sticky="w")
+        self.upd_msg = tk.StringVar()
+        ttk.Label(g, textvariable=self.upd_msg, style="Muted.TLabel").grid(row=row, column=1, sticky="w", padx=(px(10), 0))
+        self.upd_btn = ttk.Button(g, text="Check now", command=self._check_updates)
+        self.upd_btn.grid(row=row, column=2, sticky="e")
+
+        # ---- Transcript
+        t = tabs["transcript"]
+        self._section(t, "transcript", "Engine")
+        self.engine = self._combo(t, "transcript", "Transcribe with", ENGINES, cfg.get("engine", "local"),
+                                  on_change=self._engine_changed)
+        self.language = self._combo(t, "transcript", "Language", {k: k for k in tr.LANGUAGES},
+                                    cfg.get("language", "Auto"))
+        self.auto = self._check(t, "transcript", "Transcribe right after each recording",
+                                cfg.get("auto_transcribe", True))
+        # engine-specific groups
+        self.groups = {}
+        start = self._next("transcript")
+        loc = self.groups["local"] = ttk.Frame(t)
+        loc.columnconfigure(1, weight=1)
+        self.model = self._combo(loc, None, "Speech model", {k: v["label"] for k, v in tr.MODELS.items()},
+                                 cfg.get("model", "turbo"), row=0)
         self.gpu = tk.BooleanVar(value=cfg.get("use_gpu", True))
-        ttk.Checkbutton(f, text="Use the NVIDIA GPU when CUDA is available (falls back to CPU)",
-                        variable=self.gpu).grid(row=1, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(loc, text="Use an NVIDIA GPU when available", variable=self.gpu).grid(
+            row=1, column=0, columnspan=3, sticky="w", pady=px(3))
+        srv = self.groups["server"] = ttk.Frame(t)
+        srv.columnconfigure(1, weight=1)
+        self.s_url = self._entry(srv, None, "Server address", cfg.get("server_url", ""), row=0)
+        self.s_key = self._entry(srv, None, "Server key", secret_get(cfg, "server_key"), row=1, show="•")
+        self.s_res = self._test_row(srv, 2, self.test_server)
+        api = self.groups["api"] = ttk.Frame(t)
+        api.columnconfigure(1, weight=1)
+        self.a_url = self._entry(api, None, "API address", cfg.get("api_url") or DEFAULT_API_URL, row=0)
+        self.a_key = self._entry(api, None, "API key", secret_get(cfg, "api_key"), row=1, show="•")
+        self.a_model = self._entry(api, None, "Model", cfg.get("api_model") or DEFAULT_API_MODEL, row=2)
+        self.a_res = self._test_row(api, 3, self.test_api)
+        ttk.Label(api, text="Audio is sent to this service.", style="Muted.TLabel").grid(
+            row=4, column=0, columnspan=3, sticky="w")
+        for fr in self.groups.values():
+            fr.grid(row=start, column=0, columnspan=3, sticky="ew", pady=(px(4), 0))
+        self.rows["transcript"] = start + 1
+        self._section(t, "transcript", "Quality")
+        self.clean = self._combo(t, "transcript", "Clean up", CLEAN_ENGINES, cfg.get("clean_engine", "off"))
+        self._hint(t, "transcript", "Fixes capitals, punctuation and misheard terms. The original is kept.")
+        row = self._next("transcript")
+        ttk.Label(t, text="Vocabulary").grid(row=row, column=0, sticky="w", pady=px(3))
+        ttk.Button(t, text="Edit names and terms...", command=lambda: VocabularyEditor(self.win, self.theme)).grid(
+            row=row, column=1, sticky="w", padx=(px(10), 0))
+        self._engine_changed()
 
-        ttk.Label(f, text="My server", font=("Segoe UI", 10, "bold")).grid(row=2, column=0, columnspan=3, sticky="w", pady=(10, 0))
-        ttk.Label(f, text="A CryRec server you run yourself (see server/ in the repo).", foreground="#666").grid(row=3, column=0, columnspan=3, sticky="w", padx=6)
-        self.s_url = self._row(f, 4, "Address", cfg.get("server_url", ""), "https://...")
-        self.s_key = self._row(f, 5, "Key", secret_get(cfg, "server_key"), show="•")
-        self.s_res = tk.StringVar()
-        ttk.Button(f, text="Test", command=self.test_server).grid(row=6, column=2, sticky="e", **pad)
-        ttk.Label(f, textvariable=self.s_res, foreground="#666").grid(row=6, column=0, columnspan=2, sticky="w", padx=6)
+        # ---- Notes
+        n = tabs["notes"]
+        self._section(n, "notes", "Meeting notes")
+        self.notes_lang = self._combo(n, "notes", "Write notes in", {k: k for k in sm.NOTES_LANGUAGES},
+                                      cfg.get("notes_language", "English"))
+        self.my_name = self._entry(n, "notes", "Your name", cfg.get("my_name", ""))
+        self._hint(n, "notes", "Used instead of \"Me\" in action items. Pick the notes engine in the main window.")
+        self._section(n, "notes", "Cloud AI")
+        self.c_key = self._entry(n, "notes", "API key", secret_get(cfg, "claude_key"), show="•")
+        self._hint(n, "notes", "Only needed for \"Cloud AI\" on this PC. \"My server\" options use the server's key.")
+        self.adv = tk.BooleanVar(value=False)
+        ttk.Checkbutton(n, text="Show advanced options", variable=self.adv, command=self._toggle_adv).grid(
+            row=self._next("notes"), column=0, columnspan=3, sticky="w", pady=(px(10), 0))
+        adv = self.adv_frame = ttk.Frame(n)
+        adv.columnconfigure(1, weight=1)
+        self.c_model = self._entry(adv, None, "Cloud model", cfg.get("claude_model") or sm.DEFAULT_CLAUDE_MODEL, row=0)
+        self.n_model = self._entry(adv, None, "API notes model", cfg.get("notes_model") or "llama-3.3-70b-versatile", row=1)
+        self.o_url = self._entry(adv, None, "Ollama address", cfg.get("ollama_url") or sm.DEFAULT_OLLAMA_URL, row=2)
+        self.o_model = self._entry(adv, None, "Ollama model", cfg.get("ollama_model") or sm.DEFAULT_OLLAMA_MODEL, row=3)
+        self.polish_model = self._entry(adv, None, "Dictation model",
+                                        cfg.get("polish_model") or cfg.get("claude_model") or sm.DEFAULT_CLAUDE_MODEL,
+                                        row=4)
+        self.adv_row = self._next("notes")
 
-        ttk.Label(f, text="Online API", font=("Segoe UI", 10, "bold")).grid(row=7, column=0, columnspan=3, sticky="w", pady=(10, 0))
-        ttk.Label(f, text="Any OpenAI-compatible Whisper API. Audio is sent to that company.", foreground="#666").grid(row=8, column=0, columnspan=3, sticky="w", padx=6)
-        self.a_url = self._row(f, 9, "Base URL", cfg.get("api_url") or DEFAULT_API_URL)
-        self.a_key = self._row(f, 10, "API key", secret_get(cfg, "api_key"), show="•")
-        self.a_model = self._row(f, 11, "Model", cfg.get("api_model") or DEFAULT_API_MODEL)
-        self.a_res = tk.StringVar()
-        ttk.Button(f, text="Test", command=self.test_api).grid(row=12, column=2, sticky="e", **pad)
-        ttk.Label(f, textvariable=self.a_res, foreground="#666").grid(row=12, column=0, columnspan=2, sticky="w", padx=6)
-
-        ttk.Label(f, text="Transcript quality", font=("Segoe UI", 10, "bold")).grid(row=13, column=0, columnspan=3, sticky="w", pady=(10, 0))
-        ttk.Label(f, text="Clean up").grid(row=14, column=0, sticky="w", padx=6, pady=3)
-        self.clean_var = tk.StringVar(value=CLEAN_ENGINES.get(cfg.get("clean_engine"), CLEAN_ENGINES["off"]))
-        ttk.Combobox(f, textvariable=self.clean_var, values=list(CLEAN_ENGINES.values()), state="readonly", width=20).grid(row=14, column=1, sticky="w", padx=6)
-        ttk.Button(f, text="Vocabulary...", command=lambda: VocabularyEditor(self.win)).grid(row=14, column=2, sticky="e", padx=6)
-        ttk.Label(f, text="Clean up: Claude fixes capitals, punctuation and misheard terms (original kept).",
-                  foreground="#666").grid(row=15, column=0, columnspan=3, sticky="w", padx=6)
-
-        ttk.Label(fn, text="Notes", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
-        ttk.Label(fn, text="Summary, decisions and action items from the transcript.", foreground="#666").grid(row=1, column=0, columnspan=3, sticky="w", padx=6)
-        self.my_name = self._row(fn, 2, "Your name", cfg.get("my_name", ""))
-        self.n_model = self._row(fn, 3, "API model", cfg.get("notes_model") or "llama-3.3-70b-versatile")
-        self.o_url = self._row(fn, 4, "Ollama URL", cfg.get("ollama_url") or sm.DEFAULT_OLLAMA_URL)
-        self.o_model = self._row(fn, 5, "Ollama model", cfg.get("ollama_model") or sm.DEFAULT_OLLAMA_MODEL)
-        ttk.Label(fn, text="\"API model\" uses the Online API address and key (Transcript tab).", foreground="#666").grid(row=6, column=0, columnspan=3, sticky="w", padx=6)
-        ttk.Label(fn, text="Claude", font=("Segoe UI", 10, "bold")).grid(row=7, column=0, columnspan=3, sticky="w", pady=(10, 0))
-        ttk.Label(fn, text="Used for notes, transcript cleanup and dictation polish when Claude is picked.", foreground="#666").grid(row=8, column=0, columnspan=3, sticky="w", padx=6)
-        self.c_key = self._row(fn, 9, "Claude key", secret_get(cfg, "claude_key"), show="•")
-        self.c_model = self._row(fn, 10, "Claude model", cfg.get("claude_model") or sm.DEFAULT_CLAUDE_MODEL)
-
-        ttk.Label(fc, text="Calls", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
-        self.watch = tk.BooleanVar(value=cfg.get("watch_calls", True))
-        ttk.Checkbutton(fc, text="Notice Teams, Zoom and Webex calls and offer to record them",
-                        variable=self.watch).grid(row=1, column=0, columnspan=3, sticky="w", **pad)
-        self.autostart = tk.BooleanVar(value=autostart_enabled())
-        ttk.Checkbutton(fc, text="Start CryRec with Windows (in the tray)",
-                        variable=self.autostart).grid(row=2, column=0, columnspan=3, sticky="w", **pad)
-        ttk.Label(fc, text="Silence warning after").grid(row=3, column=0, sticky="w", **pad)
-        sil = ttk.Frame(fc)
-        sil.grid(row=3, column=1, columnspan=2, sticky="w", padx=6)
+        # ---- Calls & dictation
+        c = tabs["calls"]
+        self._section(c, "calls", "Calls")
+        self.watch = self._check(c, "calls", "Offer to record Teams, Zoom and Webex calls", cfg.get("watch_calls", True))
+        row = self._next("calls")
+        ttk.Label(c, text="Silence warning").grid(row=row, column=0, sticky="w", pady=px(3))
+        sil = ttk.Frame(c)
+        sil.grid(row=row, column=1, sticky="w", padx=(px(10), 0))
         self.silence = tk.StringVar(value=str(cfg.get("silence_minutes", 5)))
         ttk.Spinbox(sil, from_=0, to=60, width=5, textvariable=self.silence).grid(row=0, column=0)
-        ttk.Label(sil, text="minutes (0 = off)").grid(row=0, column=1, padx=6)
-        ttk.Label(fc, text="When a call ends or nothing is heard for that long, CryRec asks and then stops\n"
-                           "by itself after 30 seconds. It never records without asking.",
-                  foreground="#666").grid(row=4, column=0, columnspan=3, sticky="w", padx=6)
+        ttk.Label(sil, text="minutes (0 = off)", style="Muted.TLabel").grid(row=0, column=1, padx=px(8))
+        self._hint(c, "calls", "Asks before recording. Stops by itself 30 s after a call ends or goes quiet.")
+        self._section(c, "calls", "Dictation")
+        self.dict_on = self._check(c, "calls", "Dictation shortcut", cfg.get("dictation_enabled", True))
+        self.dict_key = self._combo(c, "calls", "Shortcut", {k: k for k in dictate.HOTKEYS},
+                                    cfg.get("dictation_hotkey", "Ctrl+Win"))
+        self.polish = self._combo(c, "calls", "Polish", POLISH_MODES, cfg.get("dictation_polish", "auto"))
+        self._hint(c, "calls", "Tap to start and stop (Esc cancels), or hold while you talk.\n"
+                               "Polish removes \"um\"s and fixes punctuation.")
 
-        ttk.Label(fc, text="Dictation", font=("Segoe UI", 10, "bold")).grid(row=5, column=0, columnspan=3, sticky="w", pady=(12, 0))
-        self.dict_on = tk.BooleanVar(value=cfg.get("dictation_enabled", True))
-        ttk.Checkbutton(fc, text="Dictation shortcut: speak, and the text is typed where the cursor is",
-                        variable=self.dict_on).grid(row=6, column=0, columnspan=3, sticky="w", **pad)
-        ttk.Label(fc, text="Shortcut").grid(row=7, column=0, sticky="w", **pad)
-        self.dict_key = tk.StringVar(value=cfg.get("dictation_hotkey", "Ctrl+Win"))
-        ttk.Combobox(fc, textvariable=self.dict_key, values=list(dictate.HOTKEYS), state="readonly", width=14).grid(row=7, column=1, sticky="w", padx=6)
-        ttk.Label(fc, text="Polish").grid(row=8, column=0, sticky="w", **pad)
-        self.polish = tk.StringVar(value=POLISH_MODES.get(cfg.get("dictation_polish"), POLISH_MODES["auto"]))
-        ttk.Combobox(fc, textvariable=self.polish, values=list(POLISH_MODES.values()), state="readonly", width=20).grid(row=8, column=1, sticky="w", padx=6)
-        self.polish_model = self._row(fc, 10, "Polish model", cfg.get("polish_model") or cfg.get("claude_model") or sm.DEFAULT_CLAUDE_MODEL)
-        ttk.Label(fc, text="Tap the shortcut to start and again to stop (Esc cancels), or hold it while you talk.\n"
-                           "Polish: Claude removes \"um\"s and fixes punctuation (Auto: via your server when\n"
-                           "the transcript engine is My server, else with your Claude key). Faster models\n"
-                           "(claude-haiku-5-5) add about 1 s, Opus about 2 s. Uses the mic\n"
-                           "picked in the main window, or the Windows default.",
-                  foreground="#666").grid(row=11, column=0, columnspan=3, sticky="w", padx=6)
+        # ---- buttons
+        self.err = tk.StringVar()
+        bar = ttk.Frame(outer)
+        bar.grid(row=1, column=0, sticky="ew", pady=(px(12), 0))
+        bar.columnconfigure(0, weight=1)
+        ttk.Label(bar, textvariable=self.err, style="Error.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Button(bar, text="Save", style="Accent.TButton", command=self.save).grid(row=0, column=1, padx=(0, px(6)))
+        ttk.Button(bar, text="Cancel", command=w.destroy).grid(row=0, column=2)
+        w.bind("<Escape>", lambda e: w.destroy())
+        w.grab_set()
 
-        b = ttk.Frame(outer)
-        b.grid(row=1, column=0, sticky="e", pady=(10, 0))
-        ttk.Button(b, text="Save", command=self.save).grid(row=0, column=0, padx=4)
-        ttk.Button(b, text="Cancel", command=w.destroy).grid(row=0, column=1)
+    # ---- layout helpers
+    def _next(self, tab):
+        r = self.rows[tab]
+        self.rows[tab] += 1
+        return r
 
-    def _row(self, f, r, label, value, hint=None, show=None):
-        ttk.Label(f, text=label).grid(row=r, column=0, sticky="w", padx=6, pady=3)
+    def _section(self, f, tab, text):
+        r = self._next(tab)
+        ttk.Label(f, text=text, style="Section.TLabel").grid(row=r, column=0, columnspan=3, sticky="w",
+                                                             pady=(self.theme.px(10 if r else 0), self.theme.px(2)))
+
+    def _hint(self, f, tab, text):
+        ttk.Label(f, text=text, style="Muted.TLabel", justify="left").grid(
+            row=self._next(tab), column=0, columnspan=3, sticky="w", pady=(0, self.theme.px(2)))
+
+    def _entry(self, f, tab, label, value, row=None, show=None):
+        r = self._next(tab) if row is None else row
+        ttk.Label(f, text=label).grid(row=r, column=0, sticky="w", pady=self.theme.px(3))
         var = tk.StringVar(value=value)
-        ttk.Entry(f, textvariable=var, width=46, show=show or "").grid(row=r, column=1, columnspan=2, sticky="w", padx=6, pady=3)
+        ttk.Entry(f, textvariable=var, width=40, show=show or "").grid(
+            row=r, column=1, columnspan=2, sticky="ew", padx=(self.theme.px(10), 0), pady=self.theme.px(3))
         return var
+
+    def _combo(self, f, tab, label, options, current, row=None, on_change=None):
+        """options: {key: label}. Returns a getter-friendly StringVar holding the label; read with _key()."""
+        r = self._next(tab) if row is None else row
+        ttk.Label(f, text=label).grid(row=r, column=0, sticky="w", pady=self.theme.px(3))
+        var = tk.StringVar(value=options.get(current, next(iter(options.values()))))
+        var.options = options
+        box = ttk.Combobox(f, textvariable=var, values=list(options.values()), state="readonly", width=26)
+        box.grid(row=r, column=1, sticky="w", padx=(self.theme.px(10), 0), pady=self.theme.px(3))
+        if on_change:
+            box.bind("<<ComboboxSelected>>", lambda e: on_change())
+        return var
+
+    @staticmethod
+    def _key(var):
+        return next((k for k, v in var.options.items() if v == var.get()), next(iter(var.options)))
+
+    def _check(self, f, tab, text, value):
+        var = tk.BooleanVar(value=value)
+        ttk.Checkbutton(f, text=text, variable=var).grid(row=self._next(tab), column=0, columnspan=3, sticky="w",
+                                                         pady=self.theme.px(3))
+        return var
+
+    def _test_row(self, f, row, fn):
+        res = tk.StringVar()
+        ttk.Label(f, textvariable=res, style="Muted.TLabel").grid(row=row, column=1, sticky="w", padx=(self.theme.px(10), 0))
+        ttk.Button(f, text="Test", command=fn).grid(row=row, column=2, sticky="e", pady=self.theme.px(3))
+        return res
+
+    def _engine_changed(self):
+        cur = self._key(self.engine)
+        for k, fr in self.groups.items():
+            if k == cur:
+                fr.grid()
+            else:
+                fr.grid_remove()
+
+    def _toggle_adv(self):
+        if self.adv.get():
+            self.adv_frame.grid(row=self.adv_row, column=0, columnspan=3, sticky="ew", pady=(self.theme.px(4), 0))
+        else:
+            self.adv_frame.grid_remove()
+
+    def _browse(self):
+        d = filedialog.askdirectory(initialdir=self.out_dir.get(), parent=self.win)
+        if d:
+            self.out_dir.set(d)
 
     def _bg(self, fn, out):
         out.set("Testing...")
@@ -839,7 +1002,7 @@ class SettingsDialog:
                 msg = fn()
             except Exception as e:
                 msg = f"Failed: {e}"
-            self.win.after(0, lambda: out.set(msg[:70]))
+            self.win.after(0, lambda: out.set(msg[:60]))
         threading.Thread(target=run, daemon=True).start()
 
     def test_server(self):
@@ -847,7 +1010,7 @@ class SettingsDialog:
 
         def fn():
             h = tr.server_health(url, key)
-            return f"OK, server {h.get('version')}, model {h.get('model')}"
+            return f"OK, server {h.get('version')}"
         self._bg(fn, self.s_res)
 
     def test_api(self):
@@ -858,20 +1021,48 @@ class SettingsDialog:
             with urllib.request.urlopen(req, timeout=20) as r:
                 ids = [m.get("id") for m in json.load(r).get("data", [])]
             want = self.a_model.get().strip()
-            return "OK, model found" if want in ids else f"Key OK, but model '{want}' not listed"
+            return "OK, model found" if want in ids else f"Key OK, model '{want}' not listed"
         self._bg(fn, self.a_res)
 
+    def _check_updates(self):
+        app = getattr(self.win.master, "cryrec_app", None)
+        if not app:
+            return
+        self.upd_btn.config(state="disabled")
+        self.upd_msg.set("Checking...")
+
+        def run():
+            res = app.updater.check()
+            msg = {"latest": "You have the latest version.", "busy": "Already checking.",
+                   "dev": "Updates work in the installed app only.",
+                   "newer": f"Version {app.updater.version} is ready, see the main window."}.get(
+                res, "Couldn't reach GitHub.")
+            self.win.after(0, lambda: (self.upd_msg.set(msg), self.upd_btn.config(state="normal")))
+        threading.Thread(target=run, daemon=True).start()
+
     def save(self):
-        self.cfg.update(use_gpu=self.gpu.get(), server_url=self.s_url.get().strip(),
-                        api_url=self.a_url.get().strip(), api_model=self.a_model.get().strip(),
-                        my_name=self.my_name.get().strip(), claude_model=self.c_model.get().strip(),
-                        notes_model=self.n_model.get().strip(), ollama_url=self.o_url.get().strip(),
-                        ollama_model=self.o_model.get().strip(),
-                        clean_engine=next((k for k, v in CLEAN_ENGINES.items() if v == self.clean_var.get()), "off"),
-                        watch_calls=self.watch.get(), silence_minutes=_int(self.silence.get(), 5, 0, 60),
-                        dictation_enabled=self.dict_on.get(), dictation_hotkey=self.dict_key.get(),
-                        dictation_polish=next((k for k, v in POLISH_MODES.items() if v == self.polish.get()), "auto"),
-                        polish_model=self.polish_model.get().strip())
+        engine = self._key(self.engine)
+        url = self.s_url.get().strip()
+        if engine == "server" and not url.lower().startswith(("http://", "https://")):
+            self.nb.select(1)
+            self.err.set("Server address must start with https://")
+            return
+        if not self.out_dir.get().strip():
+            self.nb.select(0)
+            self.err.set("Pick a folder for recordings.")
+            return
+        self.cfg.update(
+            out_dir=self.out_dir.get().strip(), theme=self._key(self.theme_var),
+            engine=engine, language=self._key(self.language), auto_transcribe=self.auto.get(),
+            model=self._key(self.model), use_gpu=self.gpu.get(), server_url=url,
+            api_url=self.a_url.get().strip(), api_model=self.a_model.get().strip(),
+            clean_engine=self._key(self.clean), notes_language=self._key(self.notes_lang),
+            my_name=self.my_name.get().strip(), claude_model=self.c_model.get().strip(),
+            notes_model=self.n_model.get().strip(), ollama_url=self.o_url.get().strip(),
+            ollama_model=self.o_model.get().strip(), watch_calls=self.watch.get(),
+            silence_minutes=_int(self.silence.get(), 5, 0, 60), dictation_enabled=self.dict_on.get(),
+            dictation_hotkey=self._key(self.dict_key), dictation_polish=self._key(self.polish),
+            polish_model=self.polish_model.get().strip())
         if self.autostart.get() != autostart_enabled():
             set_autostart(self.autostart.get())
         secret_set(self.cfg, "server_key", self.s_key.get().strip())
@@ -883,119 +1074,151 @@ class SettingsDialog:
             self.on_save()
 
 
+SESSION_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$")
+RECENT_COUNT = 5
+
+
+def session_when(name):
+    """'2026-10-16_10-00-00' -> 'Today 10:00' / 'Yesterday 09:00' / '14 Oct 16:00'."""
+    try:
+        dt = datetime.strptime(name, "%Y-%m-%d_%H-%M-%S")
+    except ValueError:
+        return name
+    days = (datetime.now().date() - dt.date()).days
+    day = "Today" if days == 0 else "Yesterday" if days == 1 else dt.strftime("%d %b").lstrip("0")
+    return f"{day} {dt:%H:%M}"
+
+
 class App:
     def __init__(self, root, hidden=False):
         self.hidden = hidden
         self.root = root
+        root.cryrec_app = self
         self.cfg = load_config()
+        self.theme = Theme(root, self.cfg.get("theme", "system"))
         self.pa = pyaudio.PyAudio()
         self.inputs, self.outputs = {}, {}
         self.tracks = []
         self.keepalive = None
         self.session_dir = None
+        self.saving = None
         self.t0 = None
         self.recording = False
+        self.jobs = {}  # session folder -> {"stage", "progress", "errors": {stage: message}}; Tk thread only
+        self.skip = set()  # folders cancelled while queued
+        self.running = None  # folder the worker is on
+        self.cancel_all = False
+        self.pending_msg = None  # job message that arrived while recording
+        px = self.theme.px
 
-        root.title(f"{APP} v{VERSION}" + (" (portable)" if PORTABLE else ""))
+        root.title(APP + (" (portable)" if PORTABLE else ""))
         try:
             root.iconbitmap(str(RES_DIR / "cryrec.ico"))
         except tk.TclError:
             pass
         root.resizable(False, False)
         root.protocol("WM_DELETE_WINDOW", self.quit)
+        self.theme.register(root)
 
-        pad = {"padx": 10, "pady": 4}
-        frm = ttk.Frame(root, padding=10)
-        frm.grid()
+        frm = ttk.Frame(root, padding=(px(18), px(14), px(18), px(14)))
+        frm.grid(sticky="nsew")
+        frm.columnconfigure(0, weight=1)
+        width = px(380)
 
-        ttk.Label(frm, text="Input (mic)").grid(row=0, column=0, sticky="w", **pad)
-        self.in_var = tk.StringVar()
-        self.in_box = ttk.Combobox(frm, textvariable=self.in_var, state="readonly", width=48)
-        self.in_box.grid(row=0, column=1, columnspan=2, **pad)
+        # header
+        head = ttk.Frame(frm)
+        head.grid(row=0, column=0, sticky="ew")
+        head.columnconfigure(1, weight=1)
+        ttk.Label(head, text=APP, style="Title.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(head, text=f"v{VERSION}", style="Muted.TLabel").grid(row=0, column=1, sticky="w", padx=px(6))
+        self.menu_btn = ttk.Button(head, text="", style="Icon.TButton", width=3, command=self.show_menu)
+        self.menu_btn.grid(row=0, column=2)
+        Tooltip(self.menu_btn, self.theme, "More")
+        gear = ttk.Button(head, text="", style="Icon.TButton", width=3, command=self.open_settings)
+        gear.grid(row=0, column=3, padx=(px(4), 0))
+        Tooltip(gear, self.theme, "Settings")
 
-        ttk.Label(frm, text="Output (speaker)").grid(row=1, column=0, sticky="w", **pad)
-        self.out_var = tk.StringVar()
-        self.out_box = ttk.Combobox(frm, textvariable=self.out_var, state="readonly", width=48)
-        self.out_box.grid(row=1, column=1, columnspan=2, **pad)
-
-        ttk.Label(frm, text="Mic level").grid(row=2, column=0, sticky="w", **pad)
-        self.in_meter = ttk.Progressbar(frm, length=330, maximum=1.0)
-        self.in_meter.grid(row=2, column=1, columnspan=2, **pad)
-        ttk.Label(frm, text="Speaker level").grid(row=3, column=0, sticky="w", **pad)
-        self.out_meter = ttk.Progressbar(frm, length=330, maximum=1.0)
-        self.out_meter.grid(row=3, column=1, columnspan=2, **pad)
-
-        ttk.Label(frm, text="Save to").grid(row=4, column=0, sticky="w", **pad)
-        self.dir_var = tk.StringVar(value=self.cfg.get("out_dir", str(DEFAULT_OUT)))
-        ttk.Entry(frm, textvariable=self.dir_var, width=38).grid(row=4, column=1, sticky="w", **pad)
-        ttk.Button(frm, text="Browse", command=self.pick_dir).grid(row=4, column=2, sticky="e", **pad)
-
-        bar = ttk.Frame(frm)
-        bar.grid(row=5, column=0, columnspan=3, pady=(10, 0))
-        self.rec_btn = ttk.Button(bar, text="● Record", width=14, command=self.toggle)
-        self.rec_btn.grid(row=0, column=0, padx=6)
-        ttk.Button(bar, text="Refresh devices", command=self.load_devices).grid(row=0, column=1, padx=6)
-        ttk.Button(bar, text="Open folder", command=self.open_folder).grid(row=0, column=2, padx=6)
-
-        self.status = tk.StringVar(value="Ready")
+        # timer, status, record button
         self.timer = tk.StringVar(value="00:00:00")
-        ttk.Label(frm, textvariable=self.timer, font=("Segoe UI", 16, "bold")).grid(row=6, column=0, pady=(10, 0), sticky="w", padx=10)
-        ttk.Label(frm, textvariable=self.status, wraplength=330).grid(row=6, column=1, columnspan=2, pady=(10, 0), sticky="w", padx=10)
+        ttk.Label(frm, textvariable=self.timer, style="Timer.TLabel", anchor="center").grid(
+            row=1, column=0, sticky="ew", pady=(px(14), 0))
+        self.status = tk.StringVar(value="Ready")
+        self.status_lbl = ttk.Label(frm, textvariable=self.status, style="Muted.TLabel", anchor="center",
+                                    width=1)  # width=1 + sticky ew: long text never widens the window
+        self.status_lbl.grid(row=2, column=0, sticky="ew")
+        self.status_full = ""
+        Tooltip(self.status_lbl, self.theme, lambda: self.status_full)
+        self.rec_btn = PillButton(frm, self.theme, "●  Record", self.toggle)
+        self.rec_btn.grid(row=3, column=0, pady=(px(12), px(16)))
 
-        # transcript
-        ttk.Separator(frm).grid(row=7, column=0, columnspan=3, sticky="ew", pady=(10, 4))
-        ttk.Label(frm, text="Transcript").grid(row=8, column=0, sticky="w", **pad)
-        opts = ttk.Frame(frm)
-        opts.grid(row=8, column=1, columnspan=2, sticky="w", padx=10)
-        self.engine_var = tk.StringVar(value=ENGINES.get(self.cfg.get("engine"), ENGINES["local"]))
-        eng_box = ttk.Combobox(opts, textvariable=self.engine_var, values=list(ENGINES.values()), state="readonly", width=12)
-        eng_box.grid(row=0, column=0)
-        eng_box.bind("<<ComboboxSelected>>", lambda e: self._engine_changed())
-        self.model_labels = {v["label"]: k for k, v in tr.MODELS.items()}
-        self.model_var = tk.StringVar(value=tr.MODELS.get(self.cfg.get("model"), tr.MODELS["turbo"])["label"])
-        self.model_box = ttk.Combobox(opts, textvariable=self.model_var, values=list(self.model_labels), state="readonly", width=22)
-        self.model_box.grid(row=0, column=1, padx=(6, 0))
-        lang = self.cfg.get("language")
-        self.lang_var = tk.StringVar(value=lang if lang in tr.LANGUAGES else "Auto")
-        ttk.Combobox(opts, textvariable=self.lang_var, values=list(tr.LANGUAGES), state="readonly", width=12).grid(row=0, column=2, padx=(6, 0))
-        ttk.Label(frm, text="Notes").grid(row=9, column=0, sticky="w", **pad)
-        nopts = ttk.Frame(frm)
-        nopts.grid(row=9, column=1, columnspan=2, sticky="w", padx=10)
+        # devices
+        dev = ttk.Frame(frm)
+        dev.grid(row=4, column=0, sticky="ew")
+        dev.columnconfigure(1, weight=1)
+        ttk.Label(dev, text="Microphone", style="Strong.TLabel").grid(row=0, column=0, sticky="w")
+        ref = ttk.Button(dev, text="", style="Icon.TButton", width=3, command=self.load_devices)
+        ref.grid(row=0, column=2, sticky="e")
+        Tooltip(ref, self.theme, "Refresh devices")
+        self.in_var = tk.StringVar()
+        self.in_box = ttk.Combobox(dev, textvariable=self.in_var, state="readonly", width=1)
+        self.in_box.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(px(4), px(6)))
+        self.in_meter = LevelMeter(dev, self.theme, width=360)
+        self.in_meter.grid(row=2, column=0, columnspan=3, sticky="ew")
+        ttk.Label(dev, text="Speaker (the other side)", style="Strong.TLabel").grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=(px(14), 0))
+        self.out_var = tk.StringVar()
+        self.out_box = ttk.Combobox(dev, textvariable=self.out_var, state="readonly", width=1)
+        self.out_box.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(px(4), px(6)))
+        self.out_meter = LevelMeter(dev, self.theme, width=360)
+        self.out_meter.grid(row=5, column=0, columnspan=3, sticky="ew")
+
+        # notes engine (the one choice people change per meeting)
+        nrow = ttk.Frame(frm)
+        nrow.grid(row=5, column=0, sticky="ew", pady=(px(14), 0))
+        nrow.columnconfigure(0, weight=1)
+        ttk.Label(nrow, text="Meeting notes", style="Strong.TLabel").grid(row=0, column=0, sticky="w")
         self.notes_var = tk.StringVar(value=NOTES_ENGINES.get(self.cfg.get("notes_engine"), NOTES_ENGINES["off"]))
-        ttk.Combobox(nopts, textvariable=self.notes_var, values=list(NOTES_ENGINES.values()), state="readonly", width=20).grid(row=0, column=0)
-        nl = self.cfg.get("notes_language")
-        self.notes_lang_var = tk.StringVar(value=nl if nl in sm.NOTES_LANGUAGES else "English")
-        ttk.Combobox(nopts, textvariable=self.notes_lang_var, values=list(sm.NOTES_LANGUAGES), state="readonly", width=16).grid(row=0, column=1, padx=(6, 0))
-        self.auto_var = tk.BooleanVar(value=self.cfg.get("auto_transcribe", True))
-        ttk.Checkbutton(frm, text="Transcribe (and write notes) after recording", variable=self.auto_var).grid(row=10, column=1, columnspan=2, sticky="w", padx=10)
-        tbtns = ttk.Frame(frm)
-        tbtns.grid(row=11, column=0, columnspan=3, sticky="e", padx=10, pady=(4, 0))
-        ttk.Button(tbtns, text="Settings", command=self.open_settings).grid(row=0, column=0, padx=(0, 6))
-        self.notes_btn = ttk.Button(tbtns, text="Notes...", command=self.notes_clicked)
-        self.notes_btn.grid(row=0, column=1, padx=(0, 6))
-        self.tr_btn = ttk.Button(tbtns, text="Transcribe...", command=self.transcribe_clicked)
-        self.tr_btn.grid(row=0, column=2)
-        self._engine_changed()
-        self.t_status = tk.StringVar(value="")
-        ttk.Label(frm, textvariable=self.t_status, foreground="#666", wraplength=430).grid(row=12, column=0, columnspan=3, sticky="w", padx=10)
+        nb = ttk.Combobox(nrow, textvariable=self.notes_var, values=list(NOTES_ENGINES.values()), state="readonly",
+                          width=1)
+        nb.grid(row=1, column=0, sticky="ew", pady=(px(4), 0))
+        nb.bind("<<ComboboxSelected>>", lambda e: self._save_notes_choice())
+
+        # recent recordings
+        ttk.Separator(frm).grid(row=6, column=0, sticky="ew", pady=(px(16), px(10)))
+        rh = ttk.Frame(frm)
+        rh.grid(row=7, column=0, sticky="ew")
+        rh.columnconfigure(0, weight=1)
+        ttk.Label(rh, text="Recent", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Button(rh, text="Open folder", style="Link.TButton", command=self.open_folder).grid(row=0, column=1)
+        self.recent = ttk.Frame(frm)
+        self.recent.grid(row=8, column=0, sticky="ew", pady=(px(4), 0))
+        self.recent.columnconfigure(0, weight=1)
+        self._recent_sig = None
+
+        # update bar (shown only when an update is ready)
+        self.upd_frame = ttk.Frame(frm)
+        self.upd_frame.columnconfigure(0, weight=1)
+        self.upd_text = tk.StringVar()
+        ttk.Label(self.upd_frame, textvariable=self.upd_text, style="Muted.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Button(self.upd_frame, text="Install", style="Accent.TButton", command=self.install_update).grid(
+            row=0, column=1)
+
+        frm.grid_propagate(True)
+        root.update_idletasks()
+        root.minsize(width, 0)
+
         self.t_queue = queue.Queue()
         self.t_cancel = threading.Event()
         self.t_busy = False
         threading.Thread(target=self._transcribe_worker, daemon=True).start()
-
-        ttk.Separator(frm).grid(row=13, column=0, columnspan=3, sticky="ew", pady=(10, 4))
-        self.upd_status = tk.StringVar(value="")
-        ttk.Label(frm, textvariable=self.upd_status, foreground="#666").grid(row=14, column=0, columnspan=2, sticky="w", padx=10)
-        self.upd_btn = ttk.Button(frm, text="Check for updates", command=self.update_clicked)
-        self.upd_btn.grid(row=14, column=2, sticky="e", padx=10)
-
         self.updater = Updater(lambda v: root.after(0, lambda: self.update_ready(v)))
         self.updater.start_background()
 
         self.load_devices()
+        self.refresh_recent(force=True)
         self.tick()
 
-        # calls, silence, tray
+        # calls, silence, tray, dictation
         self.calls = callwatch.CallWatcher(self.on_call_start, self.on_call_end)
         self.call_app = None
         self.start_popup = self.end_popup = None
@@ -1005,11 +1228,134 @@ class App:
         root.protocol("WM_DELETE_WINDOW", self.hide_or_quit)
         root.after(2000, self._poll_calls)
         root.after(1000, self._poll_show_flag)
+        root.after(3000, self._poll_recent)
         self.dictation = DictationUI(self)
         if self.hidden:
             root.withdraw()
         elif not self.cfg.get("asked_autostart"):
             root.after(800, self._ask_autostart)
+
+    # ---------- status line ----------
+    def set_status(self, text):
+        self.status_full = text
+        self.status.set(text)
+
+    # ---------- recent recordings ----------
+    def _recent_folders(self):
+        root = Path(self.cfg.get("out_dir", str(DEFAULT_OUT))).expanduser()
+        try:
+            dirs = [p for p in root.iterdir() if p.is_dir() and SESSION_NAME.match(p.name)]
+        except OSError:
+            return []
+        return sorted(dirs, key=lambda p: p.name, reverse=True)[:RECENT_COUNT]
+
+    def _session_state(self, d):
+        """(line, kind, open_target) for one recording folder; kind is ok/busy/error/plain."""
+        job = self.jobs.get(str(d))
+        if self.recording and self.session_dir == d:
+            return "Recording...", "busy", None
+        if self.saving == d:
+            return "Saving audio...", "busy", None
+        if job and job.get("stage"):
+            pct = f" {job['progress'] * 100:.0f}%" if job.get("progress") else ""
+            return {"transcript": "Transcribing", "clean": "Cleaning up", "notes": "Writing notes",
+                    "queued": "Waiting"}.get(job["stage"], job["stage"]) + pct, "busy", None
+        has_t, has_n = (d / "transcript.txt").exists(), (d / "notes.md").exists()
+        errors = (job or {}).get("errors", {})
+        parts = []
+        if has_t and "transcript" not in errors:
+            parts.append("✓ Transcript")
+        if has_n and "notes" not in errors:
+            parts.append("✓ Notes")
+        for stage in errors:
+            parts.append(f"✗ {stage.capitalize()} failed (hover for details)" if len(errors) == 1
+                         else f"✗ {stage.capitalize()}")
+        if not parts:
+            parts.append("Audio only" if (d / "meeting.mp3").exists() else "Empty")
+        target = d / "notes.md" if has_n else d / "transcript.txt" if has_t else d
+        kind = "error" if errors else "ok" if has_t else "plain"
+        return "  ".join(parts), kind, target
+
+    def refresh_recent(self, force=False):
+        folders = self._recent_folders()
+        states = [(d, self._session_state(d)) for d in folders]
+        sig = tuple((str(d), s[0], s[1]) for d, s in states)
+        if sig == self._recent_sig and not force:
+            return
+        self._recent_sig = sig
+        for w in self.recent.winfo_children():
+            w.destroy()
+        px = self.theme.px
+        if not states:
+            ttk.Label(self.recent, text="No recordings yet. Press Record when a meeting starts.",
+                      style="Muted.TLabel").grid(row=0, column=0, sticky="w", pady=px(4))
+            return
+        for i, (d, (line, kind, target)) in enumerate(states):
+            row = ttk.Frame(self.recent)
+            row.grid(row=i, column=0, sticky="ew", pady=px(3))
+            row.columnconfigure(0, weight=1)
+            ttk.Label(row, text=session_when(d.name), style="Strong.TLabel").grid(row=0, column=0, sticky="w")
+            style = {"error": "Error.TLabel", "ok": "Ok.TLabel"}.get(kind, "Muted.TLabel")
+            lbl = ttk.Label(row, text=line, style=style, width=1)
+            lbl.grid(row=1, column=0, sticky="ew")
+            errs = (self.jobs.get(str(d)) or {}).get("errors", {})
+            if errs:
+                Tooltip(lbl, self.theme, "\n".join(f"{k}: {v}" for k, v in errs.items()))
+            if target:
+                ttk.Button(row, text="Open", style="Link.TButton",
+                           command=lambda t=target: os.startfile(t)).grid(row=0, column=1, rowspan=2, padx=(px(6), 0))
+            more = ttk.Button(row, text="", style="Icon.TButton", width=3)
+            more.config(command=lambda d=d, b=more: self.row_menu(d, b))
+            more.grid(row=0, column=2, rowspan=2, padx=(px(4), 0))
+
+    def _poll_recent(self):
+        if self.root.state() != "withdrawn":
+            self.refresh_recent()
+        self.root.after(3000, self._poll_recent)
+
+    def row_menu(self, d, button):
+        m = tk.Menu(self.root, tearoff=False)
+        busy_here = (self.jobs.get(str(d)) or {}).get("stage")
+        if busy_here:
+            m.add_command(label="Cancel", command=lambda: self.cancel_one(d))
+        else:
+            m.add_command(label="Transcribe again", command=lambda: self.enqueue_transcript(d))
+            m.add_command(label="Write notes again", command=lambda: self.enqueue_notes(d),
+                          state="normal" if (d / "transcript.txt").exists() else "disabled")
+        m.add_separator()
+        m.add_command(label="Open folder", command=lambda: os.startfile(d))
+        m.tk_popup(button.winfo_rootx(), button.winfo_rooty() + button.winfo_height())
+
+    def show_menu(self):
+        m = tk.Menu(self.root, tearoff=False)
+        m.add_command(label="Transcribe a folder...", command=self.transcribe_clicked)
+        m.add_command(label="Write notes for a folder...", command=self.notes_clicked)
+        m.add_command(label="Open recordings folder", command=self.open_folder)
+        m.add_separator()
+        if self.t_busy:
+            m.add_command(label="Cancel all transcripts", command=self.cancel_jobs)
+        m.add_command(label="Copy last dictation", command=self.copy_last_dictation)
+        m.add_separator()
+        m.add_command(label="Quit CryRec", command=self.quit)
+        b = self.menu_btn
+        m.tk_popup(b.winfo_rootx(), b.winfo_rooty() + b.winfo_height())
+
+    def cancel_jobs(self):
+        """Stop the running job and drop everything queued."""
+        self.cancel_all = True
+        self.t_cancel.set()
+        self.set_status("Cancelling...")
+
+    def cancel_one(self, d):
+        """Cancel just this recording: drop it from the queue, or stop it if it is the one running."""
+        key = str(d)
+        if key == self.running:
+            self.t_cancel.set()
+            self.set_status("Cancelling...")
+        else:
+            self.skip.add(key)
+            self.jobs.pop(key, None)
+            self.refresh_recent(force=True)
 
     # ---------- calls and silence ----------
     def _poll_calls(self):
@@ -1135,29 +1481,14 @@ class App:
             set_autostart(True)
 
     # ---------- updates ----------
+
+    # ---------- updates ----------
     def update_ready(self, version):
-        self.upd_status.set(f"Version {version} is ready to install.")
-        self.upd_btn.config(text=f"Install update {version}", state="normal")
-
-    def update_clicked(self):
-        if self.updater.path:
-            self.install_update()
-            return
-        self.upd_btn.config(state="disabled")
-        self.upd_status.set("Checking...")
-
-        def run():
-            res = self.updater.check()
-            msg = {"latest": f"You're on the latest version ({VERSION}).",
-                   "busy": "Already checking, one moment.",
-                   "dev": "Dev build: updates only work in the exe.",
-                   "newer": None}.get(res, "Couldn't reach GitHub. Try again later.")
-            if msg:
-                self.root.after(0, lambda: (self.upd_status.set(msg), self.upd_btn.config(state="normal")))
-        threading.Thread(target=run, daemon=True).start()
+        self.upd_text.set(f"Version {version} is ready.")
+        self.upd_frame.grid(row=9, column=0, sticky="ew", pady=(self.theme.px(12), 0))
 
     def install_update(self):
-        if self.recording or str(self.rec_btn["state"]) == "disabled":
+        if self.recording or self.saving:
             messagebox.showinfo(APP, "Wait until the recording is stopped and saved, then install the update.")
             return
         if self.t_busy and not messagebox.askyesno(APP, "A transcript is running. Cancel it and install the update?"):
@@ -1172,60 +1503,60 @@ class App:
         os._exit(0)  # the installer / new exe needs this process gone
 
     # ---------- transcripts ----------
-    def _engine(self):
-        return next((k for k, v in ENGINES.items() if v == self.engine_var.get()), "local")
-
-    def _engine_changed(self):
-        self.model_box.config(state="readonly" if self._engine() == "local" else "disabled")
+    def _save_notes_choice(self):
+        self.cfg["notes_engine"] = next((k for k, v in NOTES_ENGINES.items() if v == self.notes_var.get()), "off")
+        save_config(self.cfg)
 
     def _transcript_settings(self):
-        model = self.model_labels.get(self.model_var.get(), "turbo")
-        notes = next((k for k, v in NOTES_ENGINES.items() if v == self.notes_var.get()), "off")
-        self.cfg.update(engine=self._engine(), model=model, language=self.lang_var.get(),
-                        auto_transcribe=self.auto_var.get(), notes_engine=notes,
-                        notes_language=self.notes_lang_var.get())
-        save_config(self.cfg)
+        self._save_notes_choice()
         return dict(self.cfg)
 
     def _notes_ready(self, cfg):
         """UI thread: True if the chosen notes engine has what it needs (asks the user otherwise)."""
-        need = {"claude": ("claude_key", "your Claude API key"), "openai": ("api_key", "your API key"),
-                "server_local": ("server_key", "your server address and key"),
-                "server_claude": ("server_key", "your server address and key")}.get(cfg.get("notes_engine"))
+        need = {"claude": ("claude_key", "the cloud AI key (Settings > Notes)"),
+                "openai": ("api_key", "the API key (Settings > Transcript)"),
+                "server_local": ("server_key", "your server address and key (Settings > Transcript)"),
+                "server_claude": ("server_key", "your server address and key (Settings > Transcript)")}.get(
+            cfg.get("notes_engine"))
         if need and not secret_get(cfg, need[0]):
-            messagebox.showinfo(APP, f"Notes: set {need[1]} in Settings first.")
+            messagebox.showinfo(APP, f"Notes: set {need[1]} first.")
             return False
         return True
 
+    def _pick_folder(self, title):
+        start = self.session_dir if self.session_dir and self.session_dir.exists() else \
+            Path(self.cfg.get("out_dir", str(DEFAULT_OUT)))
+        d = filedialog.askdirectory(initialdir=str(start), title=title)
+        return Path(d) if d else None
+
     def notes_clicked(self):
-        if self.t_busy:
-            return
+        d = self._pick_folder("Pick a recording folder with a transcript")
+        if d:
+            self.enqueue_notes(d)
+
+    def enqueue_notes(self, d):
         cfg = self._transcript_settings()
         if cfg["notes_engine"] == "off":
             messagebox.showinfo(APP, "Pick a notes engine next to \"Notes\" first.")
             return
-        start = self.session_dir if self.session_dir and self.session_dir.exists() else Path(self.dir_var.get())
-        d = filedialog.askdirectory(initialdir=str(start), title="Pick a recording folder with a transcript")
-        if not d:
-            return
-        if not (Path(d) / "transcript.txt").exists():
-            messagebox.showwarning(APP, "This folder has no transcript.txt yet. Use Transcribe... first.")
+        if not (d / "transcript.txt").exists():
+            messagebox.showwarning(APP, "This folder has no transcript yet. Transcribe it first.")
             return
         if self._notes_ready(cfg):
-            self.t_queue.put((Path(d), cfg, "notes"))
+            self._queue(d, cfg, "notes")
 
     def open_settings(self):
-        SettingsDialog(self.root, self.cfg, on_save=lambda: self.dictation.restart())
+        def saved():
+            self.theme.set_mode(self.cfg.get("theme", "system"))
+            self.notes_var.set(NOTES_ENGINES.get(self.cfg.get("notes_engine"), NOTES_ENGINES["off"]))
+            self.dictation.restart()
+            self.refresh_recent(force=True)
+        SettingsDialog(self.root, self.cfg, self.theme, on_save=saved)
 
     def transcribe_clicked(self):
-        if self.t_busy:
-            self.t_cancel.set()
-            self.t_status.set("Cancelling...")
-            return
-        start = self.session_dir if self.session_dir and self.session_dir.exists() else Path(self.dir_var.get())
-        d = filedialog.askdirectory(initialdir=str(start), title="Pick a recording folder")
+        d = self._pick_folder("Pick a recording folder")
         if d:
-            self.enqueue_transcript(Path(d))
+            self.enqueue_transcript(d)
 
     def enqueue_transcript(self, session_dir):
         """UI thread only: checks the model is there (asks to download once) and queues the job."""
@@ -1233,77 +1564,114 @@ class App:
         if not tr.find_tracks(session_dir):
             messagebox.showwarning(APP, f"No recording found in:\n{session_dir}")
             return
-        engine, model = cfg["engine"], cfg["model"]
+        engine, model = cfg.get("engine", "local"), cfg.get("model", "turbo")
         if engine == "local" and not tr.model_ready(MODELS_DIR, model):
             info = tr.MODELS[model]
             if not messagebox.askyesno(APP, f"Transcripts need the {info['label'].split(' (')[0]} speech model "
                                             f"({info['size_gb']} GB, one-time download).\n\n"
                                             "It runs on this computer. Audio never leaves it.\n\nDownload now?"):
-                self.t_status.set("Transcript skipped (no model).")
+                self.set_status("Transcript skipped (no speech model).")
                 return
         if engine == "server" and not (cfg.get("server_url") and secret_get(cfg, "server_key")):
-            messagebox.showinfo(APP, "Set your server address and key in Settings first.")
+            messagebox.showinfo(APP, "Set your server address and key in Settings > Transcript first.")
             return
         if engine == "api" and not secret_get(cfg, "api_key"):
-            messagebox.showinfo(APP, "Set your API key in Settings first.")
+            messagebox.showinfo(APP, "Set your API key in Settings > Transcript first.")
             return
-        if cfg["notes_engine"] != "off" and not self._notes_ready(cfg):
+        if cfg.get("notes_engine", "off") != "off" and not self._notes_ready(cfg):
             cfg["notes_engine"] = "off"  # still make the transcript
         clean = cfg.get("clean_engine", "off")
         if (clean == "claude" and not secret_get(cfg, "claude_key")) or \
                 (clean == "server_claude" and not secret_get(cfg, "server_key")):
-            messagebox.showinfo(APP, "Clean up: set the Claude key or server key in Settings first.")
+            messagebox.showinfo(APP, "Clean up: set the cloud AI key or the server key in Settings first.")
             cfg["clean_engine"] = "off"
-        self.t_queue.put((session_dir, cfg, "all"))
-        if not self.t_busy:
-            self.t_status.set("Transcript queued...")
+        self._queue(session_dir, cfg, "all")
+
+    def _queue(self, d, cfg, mode):
+        self.jobs[str(d)] = {"stage": "queued", "progress": 0, "errors": {}}
+        self.t_queue.put((d, cfg, mode))
+        self.refresh_recent(force=True)
 
     def _transcribe_worker(self):
+        """Runs jobs one by one. It never touches self.jobs or widgets directly: every change goes
+        through _t_ui, which applies it on the Tk thread."""
         loaded = {}
         while True:
             session_dir, cfg, mode = self.t_queue.get()
+            key = str(session_dir)
+            if key in self.skip:  # cancelled while still waiting in the queue
+                self.skip.discard(key)
+                self._t_ui(busy=not self.t_queue.empty())
+                continue
+            self.running = key
             self.t_cancel.clear()
-            self._t_ui(busy=True)
+            errors = {}
+            self._t_ui(busy=True, job=(key, {"stage": "transcript" if mode == "all" else "notes", "progress": 0,
+                                             "errors": {}}))
 
-            def progress(frac, text, name=session_dir.name):
-                self._t_ui(text=f"{name}: {text} ({frac * 100:.0f}%)")
+            def stage(name, key=key):
+                self._t_ui(job=(key, {"stage": name, "progress": 0}))
+
+            def progress(frac, text, key=key):
+                self._t_ui(text=text, job=(key, {"progress": frac}))
+            msg = ""
             try:
                 if mode == "all":
-                    out = run_transcript(cfg, session_dir, progress, self.t_cancel.is_set, loaded)
-                    msg = f"Transcript saved: {out}"
+                    run_transcript(cfg, session_dir, progress, self.t_cancel.is_set, loaded)
+                    msg = "Transcript saved."
                     if cfg.get("clean_engine", "off") != "off":
+                        stage("clean")
                         try:
                             kept = run_clean(cfg, session_dir, progress, self.t_cancel.is_set)
-                            msg = "Transcript saved and cleaned" + (f" ({kept} lines left as heard)" if kept else "")
+                            if kept:
+                                errors["cleanup"] = f"{kept} lines were left as heard"
                         except (tr.Cancelled, sm.Cancelled):
                             raise
                         except Exception as e:
-                            msg = f"Transcript saved, cleanup failed: {e}"
+                            errors["cleanup"] = str(e)
                 if cfg.get("notes_engine", "off") != "off":
+                    stage("notes")
                     try:
-                        notes = run_notes(cfg, session_dir, progress, self.t_cancel.is_set)
-                        msg = f"Transcript and notes saved: {notes.parent}" if mode == "all" else f"Notes saved: {notes}"
+                        run_notes(cfg, session_dir, progress, self.t_cancel.is_set)
+                        msg = "Transcript and notes saved." if mode == "all" else "Notes saved."
                     except (tr.Cancelled, sm.Cancelled):
                         raise
                     except Exception as e:
-                        msg = (f"Transcript saved, notes failed: {e}" if mode == "all" else f"Notes failed: {e}")
+                        errors["notes"] = str(e)
+                if errors:
+                    msg = "Done, with problems: " + "; ".join(f"{k} {v}" for k, v in errors.items())
             except (tr.Cancelled, sm.Cancelled):
-                msg = "Transcript cancelled."
-                while not self.t_queue.empty():
-                    self.t_queue.get_nowait()
+                msg = "Cancelled."
+                if self.cancel_all:
+                    dropped = []
+                    while not self.t_queue.empty():
+                        dropped.append(str(self.t_queue.get_nowait()[0]))
+                    self._t_ui(drop=dropped)
             except Exception as e:
+                errors["transcript"] = str(e)
                 msg = f"Transcript failed: {e}"
+            self.cancel_all = False
+            self.running = None
             if self.t_queue.empty():
                 loaded.clear()  # free ~1 GB of RAM until the next job
-            self._t_ui(busy=not self.t_queue.empty(), text=msg)
+            name = session_when(session_dir.name) if SESSION_NAME.match(session_dir.name) else session_dir.name
+            self._t_ui(busy=not self.t_queue.empty(), text=f"{name}: {msg}",
+                       job=(key, {"stage": None, "errors": dict(errors)}))
 
-    def _t_ui(self, busy=None, text=None):
+    def _t_ui(self, busy=None, text=None, job=None, drop=()):
         def apply():
             if busy is not None:
                 self.t_busy = busy
-                self.tr_btn.config(text="Cancel transcript" if busy else "Transcribe...")
+            if job:
+                self.jobs.setdefault(job[0], {"errors": {}}).update(job[1])
+            for k in drop:
+                self.jobs.pop(k, None)
             if text is not None:
-                self.t_status.set(text)
+                if self.recording:
+                    self.pending_msg = text  # shown once the recording is saved
+                else:
+                    self.set_status(text)
+            self.refresh_recent()
         self.root.after(0, apply)
 
     # ---------- devices ----------
@@ -1360,22 +1728,22 @@ class App:
     def toggle(self):
         if self.recording:
             self.stop()
-        else:
+        elif not self.saving:
             self.start()
 
     def start(self):
         mic = self.inputs.get(self.in_var.get())
         spk = self.outputs.get(self.out_var.get())
         if not mic and not spk:
-            messagebox.showwarning(APP, "Pick at least one input or output.")
+            messagebox.showwarning(APP, "Pick a microphone or a speaker first.")
             return
-        out_root = Path(self.dir_var.get()).expanduser()
+        out_root = Path(self.cfg.get("out_dir", str(DEFAULT_OUT))).expanduser()
         stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         self.session_dir = out_root / stamp
         try:
             self.session_dir.mkdir(parents=True, exist_ok=True)
         except Exception as e:
-            messagebox.showerror(APP, f"Cannot create folder:\n{e}")
+            messagebox.showerror(APP, f"Cannot create the recordings folder:\n{e}\n\nPick another one in Settings > General.")
             return
 
         self.cfg.update(input=self.in_var.get(), output=self.out_var.get(), out_dir=str(out_root))
@@ -1404,14 +1772,17 @@ class App:
             return
 
         self.recording = True
-        self.rec_btn.config(text="■ Stop")
+        self.rec_btn.configure_button(text="\u25A0  Stop", kind="stop")
         self.in_box.config(state="disabled")
         self.out_box.config(state="disabled")
-        self.status.set(f"Recording to {self.session_dir}")
+        sides = " and ".join(x for x, on in (("your mic", mic), ("the other side", spk)) if on)
+        self.set_status(f"Recording {sides}")
+        self.status_full = f"Recording to {self.session_dir}"
         self.last_sound = time.monotonic()
         if self.start_popup and self.start_popup.alive:
             self.start_popup.close()
         self._tray_title()
+        self.refresh_recent(force=True)
 
     def _teardown(self):
         for t in self.tracks:
@@ -1427,23 +1798,32 @@ class App:
         if self.end_popup and self.end_popup.alive:
             self.end_popup.close()
         self._tray_title()
-        self.rec_btn.config(text="● Record", state="disabled")
+        self.saving = self.session_dir
+        self.rec_btn.configure_button(text="Saving...", kind="stop", enabled=False)
         self.in_box.config(state="readonly")
         self.out_box.config(state="readonly")
         errors = [f"{t.role}: {t.error}" for t in self.tracks if t.error]
-        self.status.set("Saving MP3...")
+        self.set_status("Saving audio...")
+        self.refresh_recent(force=True)
         threading.Thread(target=self._finish, args=(list(self.tracks), self.session_dir, errors), daemon=True).start()
 
     def _finish(self, tracks, session_dir, errors):
         msg = finalize(tracks, session_dir)
         if errors:
-            msg += "\nErrors: " + "; ".join(errors)
+            msg += "  Errors: " + "; ".join(errors)
 
         def done():
-            self.status.set(msg)
-            self.rec_btn.config(state="normal")
-            if self.auto_var.get() and msg.startswith("Saved"):
+            self.saving = None
+            self.rec_btn.configure_button(text="\u25CF  Record", kind="record", enabled=True)
+            self.timer.set("00:00:00")
+            self.set_status("Saved." if msg.startswith("Saved") else msg)
+            self.status_full = msg
+            if self.pending_msg:
+                pending, self.pending_msg = self.pending_msg, None
+                self.root.after(4000, lambda: not self.recording and self.set_status(pending))
+            if self.cfg.get("auto_transcribe", True) and msg.startswith("Saved"):
                 self.enqueue_transcript(session_dir)
+            self.refresh_recent(force=True)
         self.root.after(0, done)
 
     # ---------- ui ----------
@@ -1452,21 +1832,16 @@ class App:
             secs = int(time.monotonic() - self.t0)
             self.timer.set(f"{secs // 3600:02d}:{secs % 3600 // 60:02d}:{secs % 60:02d}")
             lv = {t.role: t.level for t in self.tracks}
-            self.in_meter["value"] = lv.get("mic", 0)
-            self.out_meter["value"] = lv.get("spk", 0)
+            self.in_meter.set(lv.get("mic", 0))
+            self.out_meter.set(lv.get("spk", 0))
             self._check_silence(lv.values())
         else:
-            self.in_meter["value"] = 0
-            self.out_meter["value"] = 0
+            self.in_meter.set(0)
+            self.out_meter.set(0)
         self.root.after(100, self.tick)
 
-    def pick_dir(self):
-        d = filedialog.askdirectory(initialdir=self.dir_var.get())
-        if d:
-            self.dir_var.set(d)
-
     def open_folder(self):
-        target = self.session_dir if self.session_dir and self.session_dir.exists() else Path(self.dir_var.get())
+        target = Path(self.cfg.get("out_dir", str(DEFAULT_OUT))).expanduser()
         target.mkdir(parents=True, exist_ok=True)
         os.startfile(target)
 
@@ -1476,7 +1851,7 @@ class App:
         if self.recording and not messagebox.askyesno(APP, "Recording is running. Stop and save before closing?"):
             return
         if not self.recording and self.t_busy and not messagebox.askyesno(
-                APP, "A transcript is running. Close anyway? You can run it again later with Transcribe..."):
+                APP, "A transcript is running. Close anyway? You can run it again later from Recent."):
             return
         self.t_cancel.set()
         if self.recording:
@@ -1489,6 +1864,7 @@ class App:
                 pass
         self.pa.terminate()
         self.root.destroy()
+
 
 
 def finalize(tracks, session_dir):
@@ -1634,11 +2010,8 @@ def main():
             pass
         return
     cleanup_old_update()
+    enable_dpi_awareness()
     root = tk.Tk()
-    try:
-        ttk.Style().theme_use("vista")
-    except tk.TclError:
-        pass
     App(root, hidden="--hidden" in sys.argv)
     root.mainloop()
 
