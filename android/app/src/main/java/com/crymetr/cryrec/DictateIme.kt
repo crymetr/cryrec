@@ -31,6 +31,7 @@ class DictateIme : InputMethodService() {
     private var downAt = 0L
     private var sending = false
     private var generation = 0  // bumps on cancel so a late answer is dropped
+    private var lastWarm = 0L
     private lateinit var status: TextView
     private lateinit var mic: ImageButton
     private val clip by lazy { File(cacheDir, "dictate.m4a") }
@@ -104,6 +105,16 @@ class DictateIme : InputMethodService() {
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
         if (recorder == null && !sending) idleStatus()
+        warmUp()
+    }
+
+    /** Load the server's speech model as soon as the keyboard shows (at most once a minute). */
+    private fun warmUp() {
+        val p = Prefs(this)
+        val now = SystemClock.elapsedRealtime()
+        if (!p.configured || now - lastWarm < 60_000) return
+        lastWarm = now
+        Thread { runCatching { Api(p).warm() } }.start()
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
@@ -137,8 +148,7 @@ class DictateIme : InputMethodService() {
 
     private fun start() {
         if (!micAllowed() || !Prefs(this).configured) return openApp()
-        val p = Prefs(this)
-        Thread { runCatching { Api(p).warm() } }.start()  // load the model while we listen
+        warmUp()
         val r = MediaRecorder(this)
         try {
             r.setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)

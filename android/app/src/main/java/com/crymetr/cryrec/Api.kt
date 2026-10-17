@@ -11,6 +11,9 @@ import java.net.URLEncoder
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
+/** Polishing short dictations: same output as the big model in tests, about a second faster. */
+const val POLISH_MODEL = "claude-sonnet-5-5"
+
 class ApiException(message: String) : IOException(message)
 
 /** Client for the CryRec server (server/cryrec_server.py). All calls block; run them off the UI thread. */
@@ -95,6 +98,7 @@ class Api(private val base: String, private val key: String) {
     /** Short clip to text, answered on the same request. */
     fun dictate(audio: ByteArray, language: String, polish: Boolean, vocabulary: String): String =
         json("/dictate", JSONObject().put("audio_b64", Base64.encodeToString(audio, Base64.NO_WRAP))
-            .put("ext", "m4a").put("language", language).put("polish", polish).put("vocabulary", vocabulary),
+            .put("ext", "m4a").put("language", language).put("polish", polish).put("vocabulary", vocabulary)
+            .put("model", POLISH_MODEL),
             100_000).optString("text")
 }
