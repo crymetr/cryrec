@@ -28,6 +28,8 @@ class SettingsActivity : Activity() {
     private lateinit var vocab: EditText
     private lateinit var form: LinearLayout
     private lateinit var bubbleState: TextView
+    private lateinit var updateState: TextView
+    private lateinit var allowInstalls: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -95,7 +97,25 @@ class SettingsActivity : Activity() {
         })
         form.addView(fb)
 
-        hint("CryRec ${packageManager.getPackageInfo(packageName, 0).versionName}").setPadding(0, dp(24), 0, 0)
+        header("Updates")
+        hint("CryRec checks GitHub twice a day and installs new versions by itself, never while it records or dictates. " +
+            "Android asks you to confirm the first update; later ones go through on their own.")
+        updateState = hint("")
+        val ub = LinearLayout(this)
+        ub.addView(button("Check now") {
+            updateState.text = "Checking…"
+            Thread {
+                val msg = Updater.check(this, force = true)
+                runOnUiThread { updateState.text = msg }
+            }.start()
+        })
+        allowInstalls = button("Allow updates") {
+            startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, android.net.Uri.parse("package:$packageName")))
+        }
+        ub.addView(allowInstalls)
+        form.addView(ub)
+
+        hint("CryRec ${Updater.currentVersion(this)}").setPadding(0, dp(24), 0, 0)
         setContentView(ScrollView(this).apply { fitsSystemWindows = true; addView(form) })
     }
 
@@ -104,6 +124,13 @@ class SettingsActivity : Activity() {
         val on = BubbleService.enabled(this)
         bubbleState.text = if (on) "On." else "Off. Turn it on under Accessibility > CryRec floating mic."
         bubbleState.setTextColor(getColor(if (on) R.color.ok else R.color.muted))
+        val canInstall = packageManager.canRequestPackageInstalls()
+        allowInstalls.visibility = if (canInstall) View.GONE else View.VISIBLE
+        updateState.text = when {
+            !canInstall -> "Updates need \"Install unknown apps\" for CryRec (Allow updates)."
+            p.lastUpdateError.isNotEmpty() -> "Last update failed: ${p.lastUpdateError}"
+            else -> "On."
+        }
     }
 
     override fun onPause() {

@@ -63,6 +63,7 @@ class Dictation(private val context: Context, private val listener: Listener) {
             return false
         }
         recorder = r
+        busy = true
         startedAt = SystemClock.elapsedRealtime()
         ui.post(tick)
         return true
@@ -80,6 +81,7 @@ class Dictation(private val context: Context, private val listener: Listener) {
 
     fun cancel() {
         generation++
+        busy = false
         val active = recorder != null || sending
         stopRecorder()
         clip.delete()
@@ -88,7 +90,7 @@ class Dictation(private val context: Context, private val listener: Listener) {
     }
 
     fun stopAndSend() {
-        if (!stopRecorder()) { clip.delete(); listener.onIdle(); return }
+        if (!stopRecorder()) { clip.delete(); busy = false; listener.onIdle(); return }
         val audio = clip.readBytes()
         clip.delete()
         val p = Prefs(context)
@@ -100,6 +102,7 @@ class Dictation(private val context: Context, private val listener: Listener) {
             ui.post {
                 if (gen != generation) return@post
                 sending = false
+                busy = false
                 result.onSuccess { text ->
                     val t = text.trim()
                     if (t.none { it.isLetterOrDigit() }) listener.onIdle()  // silence comes back as "" or "..."
@@ -112,6 +115,8 @@ class Dictation(private val context: Context, private val listener: Listener) {
 
     companion object {
         const val MAX_SECONDS = 300L
+        /** A dictation is recording or waiting for text (the updater waits for it). */
+        @Volatile var busy = false
         private var lastWarm = 0L
 
         /** Load the server's speech model ahead of time (at most once a minute). */

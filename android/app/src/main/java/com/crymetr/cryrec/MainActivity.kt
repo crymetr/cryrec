@@ -15,7 +15,6 @@ import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.TextView
 import org.json.JSONObject
-import java.net.URL
 
 class MainActivity : Activity() {
     private val ui = Handler(Looper.getMainLooper())
@@ -38,7 +37,9 @@ class MainActivity : Activity() {
         findViewById<View>(R.id.settings).setOnClickListener { startActivity(Intent(this, SettingsActivity::class.java)) }
         record.setOnClickListener { toggleRecording() }
         recoverInterrupted()
-        checkForUpdate()
+        Updater.schedule(this)
+        if (System.currentTimeMillis() - Prefs(this).lastUpdateCheck > 6 * 3600_000L)
+            Thread { runCatching { Updater.check(this) } }.start()
         if (intent.getBooleanExtra(EXTRA_ASK_MIC, false) &&
             checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQ_MIC)
@@ -46,6 +47,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        visible = true
         lastListKey = ""
         ui.post(tick)
         // Pick up recordings that were queued while the server was not set or the app was closed.
@@ -54,6 +56,7 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
+        visible = false
         ui.removeCallbacks(tick)
         super.onPause()
     }
@@ -174,27 +177,6 @@ class MainActivity : Activity() {
         banner.setOnClickListener { onClick() }
     }
 
-    /** Once a day: is there a newer release on GitHub with an APK? */
-    private fun checkForUpdate() {
-        val p = Prefs(this)
-        if (System.currentTimeMillis() - p.lastUpdateCheck < 24 * 3600_000L) return
-        Thread {
-            runCatching {
-                val j = JSONObject(URL("https://api.github.com/repos/$REPO/releases/latest").readText())
-                p.lastUpdateCheck = System.currentTimeMillis()
-                val latest = j.getString("tag_name").removePrefix("v")
-                val assets = j.getJSONArray("assets")
-                val apk = (0 until assets.length()).map { assets.getJSONObject(it) }
-                    .firstOrNull { it.getString("name").endsWith(".apk") }?.getString("browser_download_url")
-                if (apk != null && newer(latest, BuildConfigVersion.name(this))) runOnUiThread {
-                    showBanner("CryRec $latest is out. Tap to download and install it.", "update") {
-                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(apk)))
-                    }
-                }
-            }
-        }.start()
-    }
-
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     companion object {
@@ -202,19 +184,7 @@ class MainActivity : Activity() {
         private const val REQ_MIC = 2
         const val EXTRA_ASK_MIC = "ask_mic"
         const val REPO = "crymetr/cryrec"
-
-        fun newer(a: String, b: String): Boolean {
-            val x = a.split(".").map { it.toIntOrNull() ?: 0 }
-            val y = b.split(".").map { it.toIntOrNull() ?: 0 }
-            for (i in 0 until maxOf(x.size, y.size)) {
-                val d = x.getOrElse(i) { 0 } - y.getOrElse(i) { 0 }
-                if (d != 0) return d > 0
-            }
-            return false
-        }
+        /** For the updater: show the install prompt directly only while the app is on screen. */
+        @Volatile var visible = false
     }
-}
-
-object BuildConfigVersion {
-    fun name(a: Activity): String = a.packageManager.getPackageInfo(a.packageName, 0).versionName ?: "0"
 }

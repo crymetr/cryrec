@@ -113,7 +113,7 @@ The API is documented at the top of `server/cryrec_server.py`.
 - **Dictation keyboard**: Settings > Turn on keyboard, then pick "CryRec dictation" with the keyboard button. Tap the mic, talk, tap again (or hold the mic and let go). The text is typed where the cursor is. ⌫ cancels while it listens. The keyboard button switches back to your normal keyboard.
 - **Floating mic**: a small mic button that shows at the screen edge whenever a text field has focus, in any app, with any keyboard (Gboard, Samsung, ...). Tap it, talk, tap again: the text goes into the field at the cursor. Long press cancels, drag moves it. Turn it on in Settings > Floating mic (Android Accessibility). Because the APK does not come from Play, Android may first say "Restricted setting": App info > ⋮ > Allow restricted settings, then turn it on again. It only reads the focused text field (to insert your words); fields that refuse direct typing get a paste instead.
 - Settings: server address and key (same as the desktop app), language, vocabulary, Clean up, notes engine, your name, and Polish for dictation.
-- Updates: the app checks GitHub Releases once a day and shows a banner when a new APK is out. Android asks you to allow installs from your browser the first time.
+- Updates: the app checks GitHub Releases every 12 hours and installs a new APK by itself, never while it records, sends a recording or dictates. Allow "Install unknown apps" for CryRec once (Settings > Updates > Allow updates). Android asks you to confirm the first self-update; after that CryRec is its own installer and updates go through silently (Android 12+), with a "CryRec updated" notification.
 - Plain `http://` addresses work too (for a server on your own network or Tailscale), but the key then travels unencrypted. Use `https://` on the internet.
 
 Build: `android\gradlew.bat -p android assembleRelease` (JDK 17, Android SDK in `local.properties`). Release signing comes from `android\keystore.properties` or the `CRYREC_KEYSTORE_*` environment variables.
@@ -165,4 +165,4 @@ powershell -File packaging\build.ps1
 - v0.7: dictation
 - v0.8: new look: Windows 11 style, light/dark follows Windows, sharp at any display scaling, Recent recordings list
 - v0.9: Android app: phone mic recording and a dictation keyboard, both through your server
-- v0.10: Android floating mic: dictate into any app with any keyboard (this)
+- v0.10: Android floating mic: dictate into any app with any keyboard; Android self-updates (this)

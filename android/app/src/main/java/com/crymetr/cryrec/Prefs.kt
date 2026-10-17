@@ -39,6 +39,12 @@ class Prefs(context: Context) {
     var bubbleY: Int
         get() = sp.getInt("bubble_y", -1)
         set(v) = sp.edit().putInt("bubble_y", v).apply()
+    var updateApi: String
+        get() = sp.getString("update_api", "")!!
+        set(v) = sp.edit().putString("update_api", v).apply()
+    var lastUpdateError: String
+        get() = sp.getString("last_update_error", "")!!
+        set(v) = sp.edit().putString("last_update_error", v).apply()
     var lastUpdateCheck: Long
         get() = sp.getLong("last_update_check", 0)
         set(v) = sp.edit().putLong("last_update_check", v).apply()
