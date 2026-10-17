@@ -2,7 +2,7 @@
 
 Windows meeting recorder. Pick a mic and a speaker, press Record. CryRec saves both sides, writes a transcript with who said what, can write meeting notes, offers to record when a Teams/Zoom/Webex call starts, and does dictation in any app.
 
-Windows 10/11 only (it records system audio through WASAPI loopback).
+Windows 10/11 (it records system audio through WASAPI loopback). There is also a small [Android app](#android) that records with the phone's mic and dictates in any app, using your CryRec server.
 
 ## Install
 
@@ -97,11 +97,25 @@ The server only listens on localhost. Put HTTPS in front of it (Cloudflare Tunne
 
 - Audio is deleted right after each job; finished transcripts and notes are dropped after 24 hours (`keep_hours`).
 - The model is loaded when work comes in and released when the queue is empty, so the GPU stays free for other work. After a dictation it stays loaded for `keep_warm_minutes` (10) so the next one is quick, and dictation jumps ahead of long meeting jobs.
+- The Android app uploads one AAC track (`meeting.m4a`, 48 kbps, about 22 MB per hour).
 - Uploads are MP3, 64 kbps per track for meetings up to about 1.5 hours. Longer meetings get a lower bitrate (down to 16 kbps), so one 95 MB upload holds up to about 6 hours.
 - `vocabulary_file` (default `%APPDATA%\CryRec\vocabulary.txt`) is merged with each client's vocabulary.
 - `/health` also reports the NVIDIA power limit and P-state, handy for an outside watchdog.
 
 The API is documented at the top of `server/cryrec_server.py`.
+
+## Android
+
+`CryRec-<ver>-android.apk` from the Releases page (Android 10 or newer). It needs a CryRec server (above); the phone does no speech recognition itself.
+
+- **Record**: records the phone's microphone, also with the screen off. Use it for meetings in a room, or a call on speakerphone. Android does not let apps record the other side of Teams, Zoom, WhatsApp or phone calls, so there is no Me / Them split: the transcript has one "Speaker".
+- When you stop, the recording is sent to your server. The transcript, the optional Clean up and the notes come back into the app. Share sends them to any app as text. Without a server set, recordings stay on the phone until you add one.
+- **Dictation keyboard**: Settings > Turn on keyboard, then pick "CryRec dictation" with the keyboard button. Tap the mic, talk, tap again (or hold the mic and let go). The text is typed where the cursor is. ⌫ cancels while it listens. The keyboard button switches back to your normal keyboard.
+- Settings: server address and key (same as the desktop app), language, vocabulary, Clean up, notes engine, your name, and Polish for dictation.
+- Updates: the app checks GitHub Releases once a day and shows a banner when a new APK is out. Android asks you to allow installs from your browser the first time.
+- Plain `http://` addresses work too (for a server on your own network or Tailscale), but the key then travels unencrypted. Use `https://` on the internet.
+
+Build: `android\gradlew.bat -p android assembleRelease` (JDK 17, Android SDK in `local.properties`). Release signing comes from `android\keystore.properties` or the `CRYREC_KEYSTORE_*` environment variables.
 
 ## Updates
 
@@ -135,7 +149,7 @@ powershell -File packaging\build.ps1
 
 1. Bump `VERSION` in `cryrec.pyw` and commit.
 2. `git tag vX.Y.Z && git push origin main vX.Y.Z`
-3. GitHub Actions builds the installer and portable zip and attaches them to the release (it fails if the tag and `VERSION` differ). Running apps pick it up within an hour.
+3. GitHub Actions builds the installer, portable zip and Android APK and attaches them to the release (it fails if the tag and `VERSION` differ). Running apps pick it up within an hour.
 
 `CryRec.exe --selftest <dir>` records 3 s of speaker audio headless and writes the result to `<dir>\selftest.txt`.
 
@@ -148,4 +162,5 @@ powershell -File packaging\build.ps1
 - v0.5: vocabulary, transcript cleanup, fewer Whisper loops
 - v0.6: tray, start with Windows, call detection and silence warning
 - v0.7: dictation
-- v0.8: new look: Windows 11 style, light/dark follows Windows, sharp at any display scaling, Recent recordings list (this)
+- v0.8: new look: Windows 11 style, light/dark follows Windows, sharp at any display scaling, Recent recordings list
+- v0.9: Android app: phone mic recording and a dictation keyboard, both through your server (this)

@@ -42,7 +42,7 @@ import summarize as sm
 import transcribe as tr
 
 APP = "CryRec"
-VERSION = "0.8.1"
+VERSION = "0.9.0"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))

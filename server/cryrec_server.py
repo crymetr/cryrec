@@ -9,7 +9,7 @@ device (auto|cuda|cpu), models_dir, jobs_dir, keep_hours, log_file.
 
 API (all need "Authorization: Bearer <key>"):
     GET    /health            {ok, version, model, device}
-    POST   /jobs?language=&name=   body = zip with me.mp3 / them.mp3 (or meeting.mp3) -> {id}
+    POST   /jobs?language=&name=   body = zip with me.mp3 / them.mp3 (or meeting.mp3 / .m4a) -> {id}
     POST   /notes             JSON {transcript, backend: local|claude, language, my_name, vocabulary} -> {id}
     POST   /clean             JSON {transcript, vocabulary} -> {id}   (Claude fixes casing/punctuation/terms)
     POST   /dictate           JSON {audio_b64, ext, language, polish, model, vocabulary} -> {text, raw}
@@ -47,7 +47,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import summarize as sm  # noqa: E402
 import transcribe as tr  # noqa: E402
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 APPDATA = Path(os.environ.get("APPDATA", Path.home())) / "CryRec"
 LOCALAPPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "CryRec"
 DEFAULTS = {
@@ -405,7 +405,7 @@ def make_handler(cfg, jobs):
                     audio = base64.b64decode(p["audio_b64"])
                 except (ValueError, KeyError):
                     return self._send(400, {"error": "bad request"})
-                ext = p.get("ext") if p.get("ext") in ("mp3", "wav", "flac") else "mp3"
+                ext = p.get("ext") if p.get("ext") in ("mp3", "wav", "flac", "m4a") else "mp3"
                 job = jobs.add_dictate(audio, ext, p.get("language"), bool(p.get("polish")), p.get("model"),
                                        str(p.get("vocabulary", "")))
                 if not job["done"].wait(90):  # stay under proxy timeouts (Cloudflare: 100 s)

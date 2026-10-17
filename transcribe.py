@@ -101,7 +101,7 @@ def load_audio(path):
 
 
 def find_tracks(session_dir):
-    """[(label, path)] for this recording. Falls back to meeting.mp3 as one track."""
+    """[(label, path)] for this recording. Falls back to meeting.* (mixed or phone mic) as one track."""
     found = []
     for stem, label in TRACKS:
         for ext in (".flac", ".wav", ".mp3"):
@@ -109,8 +109,11 @@ def find_tracks(session_dir):
             if p.exists():
                 found.append((label, p))
                 break
-    if not found and (session_dir / "meeting.mp3").exists():
-        found.append(("Speaker", session_dir / "meeting.mp3"))
+    if not found:
+        for ext in (".mp3", ".m4a", ".flac", ".wav"):
+            if (session_dir / f"meeting{ext}").exists():
+                found.append(("Speaker", session_dir / f"meeting{ext}"))
+                break
     return found
 
 

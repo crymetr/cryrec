@@ -53,3 +53,40 @@ jobs:
           path: |
             dist/CryRec-*-setup.exe
             dist/CryRec-*-portable.zip
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Build signed APK
+        env:
+          CRYREC_KEYSTORE_B64: ${{ secrets.CRYREC_KEYSTORE_B64 }}
+          CRYREC_KEYSTORE_PASSWORD: ${{ secrets.CRYREC_KEYSTORE_PASSWORD }}
+          CRYREC_KEY_ALIAS: ${{ secrets.CRYREC_KEY_ALIAS }}
+        run: |
+          echo "$CRYREC_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          export CRYREC_KEYSTORE_FILE="$RUNNER_TEMP/release.jks"
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+          v=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' ../cryrec.pyw)
+          mkdir -p ../dist
+          cp app/build/outputs/apk/release/app-release.apk "../dist/CryRec-$v-android.apk"
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/CryRec-*-android.apk
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: CryRec-android
+          path: dist/CryRec-*-android.apk

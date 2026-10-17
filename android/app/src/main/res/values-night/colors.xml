@@ -1,0 +1,12 @@
+<resources>
+    <color name="bg">#1C1C1E</color>
+    <color name="surface">#2C2C2E</color>
+    <color name="text">#F2F2F7</color>
+    <color name="muted">#A1A1A6</color>
+    <color name="line">#3A3A3C</color>
+    <color name="accent">#FF5A55</color>
+    <color name="ok">#66BB6A</color>
+    <color name="key">#3A3A3C</color>
+    <color name="kb_bg">#202022</color>
+    <bool name="light_bars">false</bool>
+</resources>
