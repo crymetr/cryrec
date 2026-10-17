@@ -27,6 +27,7 @@ class SettingsActivity : Activity() {
     private lateinit var polish: CheckBox
     private lateinit var vocab: EditText
     private lateinit var form: LinearLayout
+    private lateinit var bubbleState: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -82,8 +83,27 @@ class SettingsActivity : Activity() {
         kb.addView(button("Switch keyboard") { getSystemService(InputMethodManager::class.java).showInputMethodPicker() })
         form.addView(kb)
 
+        header("Floating mic")
+        hint("A small mic button that shows next to the screen edge whenever you type, in any app, with any keyboard. " +
+            "Tap it, talk, tap again: the text goes into the field. Long press cancels, drag moves it.")
+        bubbleState = hint("")
+        hint("If Android says \"Restricted setting\": open App info, tap ⋮ (top right), \"Allow restricted settings\", then turn it on again.")
+        val fb = LinearLayout(this)
+        fb.addView(button("Turn on floating mic") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
+        fb.addView(button("App info") {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, android.net.Uri.fromParts("package", packageName, null)))
+        })
+        form.addView(fb)
+
         hint("CryRec ${packageManager.getPackageInfo(packageName, 0).versionName}").setPadding(0, dp(24), 0, 0)
         setContentView(ScrollView(this).apply { fitsSystemWindows = true; addView(form) })
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val on = BubbleService.enabled(this)
+        bubbleState.text = if (on) "On." else "Off. Turn it on under Accessibility > CryRec floating mic."
+        bubbleState.setTextColor(getColor(if (on) R.color.ok else R.color.muted))
     }
 
     override fun onPause() {

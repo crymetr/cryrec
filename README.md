@@ -111,6 +111,7 @@ The API is documented at the top of `server/cryrec_server.py`.
 - **Record**: records the phone's microphone, also with the screen off. Use it for meetings in a room, or a call on speakerphone. Android does not let apps record the other side of Teams, Zoom, WhatsApp or phone calls, so there is no Me / Them split: the transcript has one "Speaker".
 - When you stop, the recording is sent to your server. The transcript, the optional Clean up and the notes come back into the app. Share sends them to any app as text. Without a server set, recordings stay on the phone until you add one.
 - **Dictation keyboard**: Settings > Turn on keyboard, then pick "CryRec dictation" with the keyboard button. Tap the mic, talk, tap again (or hold the mic and let go). The text is typed where the cursor is. ⌫ cancels while it listens. The keyboard button switches back to your normal keyboard.
+- **Floating mic**: a small mic button that shows at the screen edge whenever a text field has focus, in any app, with any keyboard (Gboard, Samsung, ...). Tap it, talk, tap again: the text goes into the field at the cursor. Long press cancels, drag moves it. Turn it on in Settings > Floating mic (Android Accessibility). Because the APK does not come from Play, Android may first say "Restricted setting": App info > ⋮ > Allow restricted settings, then turn it on again. It only reads the focused text field (to insert your words); fields that refuse direct typing get a paste instead.
 - Settings: server address and key (same as the desktop app), language, vocabulary, Clean up, notes engine, your name, and Polish for dictation.
 - Updates: the app checks GitHub Releases once a day and shows a banner when a new APK is out. Android asks you to allow installs from your browser the first time.
 - Plain `http://` addresses work too (for a server on your own network or Tailscale), but the key then travels unencrypted. Use `https://` on the internet.
@@ -163,4 +164,5 @@ powershell -File packaging\build.ps1
 - v0.6: tray, start with Windows, call detection and silence warning
 - v0.7: dictation
 - v0.8: new look: Windows 11 style, light/dark follows Windows, sharp at any display scaling, Recent recordings list
-- v0.9: Android app: phone mic recording and a dictation keyboard, both through your server (this)
+- v0.9: Android app: phone mic recording and a dictation keyboard, both through your server
+- v0.10: Android floating mic: dictate into any app with any keyboard (this)

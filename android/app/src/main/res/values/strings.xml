@@ -1,0 +1,3 @@
+<resources>
+    <string name="bubble_description">Shows a small mic button next to the screen edge while you type in any app. Tap it, talk, tap again: the text is written into the field. CryRec only reads which text field has focus and its text so it can insert your words. Nothing else on screen is read or sent anywhere; only your voice clip goes to your own CryRec server.</string>
+</resources>

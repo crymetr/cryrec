@@ -1,11 +1,8 @@
 package com.crymetr.cryrec
 
-import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.inputmethodservice.InputMethodService
-import android.media.MediaRecorder
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -18,32 +15,17 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.TextView
-import java.io.File
 
 /**
  * Dictation keyboard. Tap the mic to start and tap again to send, or hold it and let go to send.
  * The clip goes to the server's /dictate; the text is typed where the cursor is.
  */
-class DictateIme : InputMethodService() {
+class DictateIme : InputMethodService(), Dictation.Listener {
     private val ui = Handler(Looper.getMainLooper())
-    private var recorder: MediaRecorder? = null
-    private var startedAt = 0L
+    private val dictation by lazy { Dictation(this, this) }
     private var downAt = 0L
-    private var sending = false
-    private var generation = 0  // bumps on cancel so a late answer is dropped
-    private var lastWarm = 0L
     private lateinit var status: TextView
     private lateinit var mic: ImageButton
-    private val clip by lazy { File(cacheDir, "dictate.m4a") }
-    private val tick = object : Runnable {
-        override fun run() {
-            if (recorder == null) return
-            val s = (SystemClock.elapsedRealtime() - startedAt) / 1000
-            if (s >= MAX_SECONDS) return stopAndSend()
-            status.text = "Listening  ${formatDuration(s)}   ·   tap ⌫ to cancel"
-            ui.postDelayed(this, 500)
-        }
-    }
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreateInputView(): View {
@@ -63,7 +45,7 @@ class DictateIme : InputMethodService() {
             textSize = 14f
             setTextColor(getColor(R.color.muted))
             setPadding(dp(8), dp(4), dp(8), dp(8))
-            setOnClickListener { if (!micAllowed() || !Prefs(this@DictateIme).configured) openApp() }
+            setOnClickListener { if (!dictation.micAllowed() || !Prefs(this@DictateIme).configured) openApp() }
         }
         root.addView(status)
 
@@ -104,27 +86,18 @@ class DictateIme : InputMethodService() {
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
-        if (recorder == null && !sending) idleStatus()
-        warmUp()
-    }
-
-    /** Load the server's speech model as soon as the keyboard shows (at most once a minute). */
-    private fun warmUp() {
-        val p = Prefs(this)
-        val now = SystemClock.elapsedRealtime()
-        if (!p.configured || now - lastWarm < 60_000) return
-        lastWarm = now
-        Thread { runCatching { Api(p).warm() } }.start()
+        if (!dictation.recording && !dictation.sending) idleStatus()
+        Dictation.warmUp(this)  // load the server's model as soon as the keyboard shows
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
-        cancel()
+        dictation.cancel()
         super.onFinishInputView(finishingInput)
     }
 
     private fun idleStatus() {
         status.text = when {
-            !micAllowed() -> "Open CryRec once to allow the microphone (tap here)"
+            !dictation.micAllowed() -> "Open CryRec once to allow the microphone (tap here)"
             !Prefs(this).configured -> "Set your server in CryRec first (tap here)"
             else -> "Tap to talk, tap again to send. Or hold."
         }
@@ -136,89 +109,44 @@ class DictateIme : InputMethodService() {
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 downAt = SystemClock.elapsedRealtime()
-                if (recorder == null && !sending) start() else downAt = 0  // second tap: send on release
+                if (!dictation.recording && !dictation.sending) {
+                    if (!dictation.micAllowed() || !Prefs(this).configured) return openApp()
+                    if (dictation.start()) mic.setImageResource(R.drawable.ic_stop)
+                } else downAt = 0  // second tap: send on release
             }
             MotionEvent.ACTION_UP -> {
-                if (recorder == null) return
+                if (!dictation.recording) return
                 val held = downAt > 0 && SystemClock.elapsedRealtime() - downAt > HOLD_MS
-                if (downAt == 0L || held) stopAndSend()
+                if (downAt == 0L || held) dictation.stopAndSend()
             }
         }
     }
 
-    private fun start() {
-        if (!micAllowed() || !Prefs(this).configured) return openApp()
-        warmUp()
-        val r = MediaRecorder(this)
-        try {
-            r.setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
-            r.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-            r.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-            r.setAudioChannels(1)
-            r.setAudioSamplingRate(16_000)
-            r.setAudioEncodingBitRate(32_000)
-            r.setOutputFile(clip.path)
-            r.prepare()
-            r.start()
-        } catch (e: Exception) {
-            r.release()
-            status.text = "Microphone is busy"
-            return
-        }
-        recorder = r
-        startedAt = SystemClock.elapsedRealtime()
-        mic.setImageResource(R.drawable.ic_stop)
-        ui.post(tick)
+    override fun onTick(seconds: Long) {
+        status.text = "Listening  ${formatDuration(seconds)}   ·   tap ⌫ to cancel"
     }
 
-    /** Stop the recorder; returns true if the clip is usable. */
-    private fun stopRecorder(): Boolean {
-        val r = recorder ?: return false
-        recorder = null
-        ui.removeCallbacks(tick)
-        val ok = try { r.stop(); true } catch (e: RuntimeException) { false }  // too short
-        r.release()
+    override fun onSending() {
         mic.setImageResource(R.drawable.ic_mic)
-        return ok && SystemClock.elapsedRealtime() - startedAt > 400
-    }
-
-    private fun cancel() {
-        generation++
-        val wasRecording = recorder != null
-        stopRecorder()
-        clip.delete()
-        sending = false
-        if (wasRecording && ::status.isInitialized) idleStatus()
-    }
-
-    private fun stopAndSend() {
-        if (!stopRecorder()) { clip.delete(); idleStatus(); return }
-        val audio = clip.readBytes()
-        clip.delete()
-        val p = Prefs(this)
-        val gen = generation
-        sending = true
         mic.alpha = 0.5f
         status.text = "Writing…"
-        Thread {
-            val result = runCatching { Api(p).dictate(audio, p.language, p.polish, p.vocabulary) }
-            ui.post {
-                if (gen != generation) return@post
-                sending = false
-                result.onSuccess { insert(it) }
-                idleStatus()
-                result.onFailure { status.text = "Failed: ${it.message ?: it.javaClass.simpleName}" }
-            }
-        }.start()
     }
 
-    private fun insert(text: String) {
-        val t = text.trim()
-        if (t.none { it.isLetterOrDigit() }) return  // silence comes back as "" or "..."
+    override fun onText(text: String) {
+        idleStatus()
         val ic = currentInputConnection ?: return
         val before = ic.getTextBeforeCursor(1, 0)
         val space = if (before.isNullOrEmpty() || before.last().isWhitespace()) "" else " "
-        ic.commitText(space + t, 1)
+        ic.commitText(space + text, 1)
+    }
+
+    override fun onError(message: String) {
+        idleStatus()
+        status.text = message
+    }
+
+    override fun onIdle() {
+        if (::status.isInitialized) idleStatus()
     }
 
     private val repeatDelete = object : Runnable {
@@ -228,7 +156,7 @@ class DictateIme : InputMethodService() {
     private fun onBackspaceTouch(e: MotionEvent) {
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                if (recorder != null || sending) { cancel(); return }
+                if (dictation.recording || dictation.sending) { dictation.cancel(); return }
                 deleteOne()
                 ui.postDelayed(repeatDelete, 450)
             }
@@ -248,10 +176,8 @@ class DictateIme : InputMethodService() {
         else sendDownUpKeyEvents(KeyEvent.KEYCODE_ENTER)
     }
 
-    private fun micAllowed() = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-
     private fun openApp() {
-        val target = if (micAllowed()) SettingsActivity::class.java else MainActivity::class.java
+        val target = if (dictation.micAllowed()) SettingsActivity::class.java else MainActivity::class.java
         startActivity(Intent(this, target).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK).putExtra(MainActivity.EXTRA_ASK_MIC, true))
     }
 
@@ -267,6 +193,5 @@ class DictateIme : InputMethodService() {
 
     companion object {
         private const val HOLD_MS = 400
-        private const val MAX_SECONDS = 300L
     }
 }
