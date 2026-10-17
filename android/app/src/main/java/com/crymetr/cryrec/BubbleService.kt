@@ -25,8 +25,8 @@ import android.widget.Toast
 import kotlin.math.abs
 
 /**
- * Floating dictation button. Shows next to the screen edge while a text field has focus, in any app.
- * Tap: start; tap again: stop and send. Long press: cancel. Drag: move it.
+ * Floating dictation button. Shows just above the keyboard while you type, in any app.
+ * Tap: start; tap again: stop and send. Long press: cancel. Drag left/right: switch side.
  * The text goes into the focused field (set text, or paste), or to the clipboard if there is none.
  */
 class BubbleService : AccessibilityService(), Dictation.Listener {
@@ -40,6 +40,7 @@ class BubbleService : AccessibilityService(), Dictation.Listener {
     private var target: AccessibilityNodeInfo? = null
     private var shown = false
     private val checkFocus = Runnable { updateVisibility() }
+    private val checkFocusLate = Runnable { updateVisibility() }
 
     override fun onServiceConnected() {
         wm = getSystemService(WindowManager::class.java)
@@ -50,7 +51,9 @@ class BubbleService : AccessibilityService(), Dictation.Listener {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         ui.removeCallbacks(checkFocus)
+        ui.removeCallbacks(checkFocusLate)
         ui.postDelayed(checkFocus, 150)
+        ui.postDelayed(checkFocusLate, 700)  // the keyboard window can show up after the focus event
     }
 
     override fun onInterrupt() {}
@@ -64,16 +67,25 @@ class BubbleService : AccessibilityService(), Dictation.Listener {
     private fun focusedField(): AccessibilityNodeInfo? =
         findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.takeIf { it.isEditable }
 
-    /** Visible while a text field has focus (and always while recording or sending). */
+    /**
+     * Visible only while a keyboard is on screen for a text field, sitting just above it
+     * (and always while recording or sending, so a hidden keyboard can't strand a dictation).
+     */
     private fun updateVisibility() {
-        val field = focusedField()
-        // Our own keyboard already has a mic.
-        val ownKeyboard = windows.any { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD &&
-            it.root?.packageName == packageName }
-        val want = dictation.recording || dictation.sending ||
-            (field != null && !ownKeyboard && Prefs(this).configured)
-        if (want == shown) return
+        val ime = windows.firstOrNull { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+        val ownKeyboard = ime?.root?.packageName == packageName  // our keyboard has its own mic
+        val typing = ime != null && !ownKeyboard && focusedField() != null && Prefs(this).configured
+        val want = dictation.recording || dictation.sending || typing
         val v = root ?: return
+        if (ime != null && typing) {
+            val r = android.graphics.Rect().also { ime.getBoundsInScreen(it) }
+            val y = wm.currentWindowMetrics.bounds.height() - r.top + dp(6)
+            if (y != params.y) {
+                params.y = y
+                if (shown) wm.updateViewLayout(v, params)
+            }
+        }
+        if (want == shown) return
         if (want) {
             wm.addView(v, params)
             Dictation.warmUp(this)
@@ -101,9 +113,9 @@ class BubbleService : AccessibilityService(), Dictation.Listener {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
             setPadding(dp(4), dp(4), dp(4), dp(4))
-            addView(bubble, LinearLayout.LayoutParams(dp(52), dp(52)))
             addView(label, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                .apply { topMargin = dp(4) })
+                .apply { bottomMargin = dp(4) })
+            addView(bubble, LinearLayout.LayoutParams(dp(52), dp(52)))
         }
         setIdleLook()
         params = WindowManager.LayoutParams(
@@ -112,13 +124,13 @@ class BubbleService : AccessibilityService(), Dictation.Listener {
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT,
         ).apply {
-            gravity = Gravity.TOP or (if (p.bubbleRight) Gravity.END else Gravity.START)
-            x = 0
-            y = p.bubbleY.takeIf { it >= 0 } ?: (resources.displayMetrics.heightPixels / 3)
+            gravity = Gravity.BOTTOM or (if (p.bubbleRight) Gravity.END else Gravity.START)
+            x = dp(4)
+            y = 0
         }
 
         val slop = ViewConfiguration.get(this).scaledTouchSlop
-        var downX = 0f; var downY = 0f; var startY = 0; var dragging = false; var longPressed = false
+        var downX = 0f; var downY = 0f; var dragging = false; var longPressed = false
         val longPress = Runnable {
             longPressed = true
             if (dictation.recording || dictation.sending) {
@@ -129,7 +141,7 @@ class BubbleService : AccessibilityService(), Dictation.Listener {
         bubble.setOnTouchListener { _, e ->
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    downX = e.rawX; downY = e.rawY; startY = params.y; dragging = false; longPressed = false
+                    downX = e.rawX; downY = e.rawY; dragging = false; longPressed = false
                     ui.postDelayed(longPress, ViewConfiguration.getLongPressTimeout().toLong())
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -137,19 +149,15 @@ class BubbleService : AccessibilityService(), Dictation.Listener {
                         dragging = true
                         ui.removeCallbacks(longPress)
                     }
-                    if (dragging) {
-                        params.y = (startY + (e.rawY - downY)).toInt().coerceAtLeast(0)
-                        wm.updateViewLayout(root, params)
-                    }
                 }
                 MotionEvent.ACTION_UP -> {
                     ui.removeCallbacks(longPress)
                     if (dragging) {
-                        // Snap to the nearer edge.
+                        // Drag left or right to move it to that side of the keyboard.
                         val right = e.rawX > resources.displayMetrics.widthPixels / 2
-                        params.gravity = Gravity.TOP or (if (right) Gravity.END else Gravity.START)
+                        params.gravity = Gravity.BOTTOM or (if (right) Gravity.END else Gravity.START)
                         wm.updateViewLayout(root, params)
-                        Prefs(this).apply { bubbleRight = right; bubbleY = params.y }
+                        Prefs(this).bubbleRight = right
                     } else if (!longPressed) onTap()
                 }
                 MotionEvent.ACTION_CANCEL -> ui.removeCallbacks(longPress)

@@ -86,8 +86,8 @@ class SettingsActivity : Activity() {
         form.addView(kb)
 
         header("Floating mic")
-        hint("A small mic button that shows next to the screen edge whenever you type, in any app, with any keyboard. " +
-            "Tap it, talk, tap again: the text goes into the field. Long press cancels, drag moves it.")
+        hint("A small mic button that shows just above the keyboard whenever you type, in any app, with any keyboard. " +
+            "Tap it, talk, tap again: the text goes into the field. Long press cancels, drag left or right to switch sides.")
         bubbleState = hint("")
         hint("If Android says \"Restricted setting\": open App info, tap ⋮ (top right), \"Allow restricted settings\", then turn it on again.")
         val fb = LinearLayout(this)

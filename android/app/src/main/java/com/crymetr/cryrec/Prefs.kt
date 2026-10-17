@@ -36,9 +36,6 @@ class Prefs(context: Context) {
     var bubbleRight: Boolean
         get() = sp.getBoolean("bubble_right", true)
         set(v) = sp.edit().putBoolean("bubble_right", v).apply()
-    var bubbleY: Int
-        get() = sp.getInt("bubble_y", -1)
-        set(v) = sp.edit().putInt("bubble_y", v).apply()
     var updateApi: String
         get() = sp.getString("update_api", "")!!
         set(v) = sp.edit().putString("update_api", v).apply()
