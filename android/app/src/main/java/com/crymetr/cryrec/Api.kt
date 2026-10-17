@@ -11,8 +11,8 @@ import java.net.URLEncoder
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-/** Polishing short dictations: same output as the big model in tests, about a second faster. */
-const val POLISH_MODEL = "claude-sonnet-5-5"
+/** Polishing dictations: in tests the only model with no meaning changes, ~0.4 s slower than the mid one. */
+const val POLISH_MODEL = "claude-opus-5-5"
 
 class ApiException(message: String) : IOException(message)
 
