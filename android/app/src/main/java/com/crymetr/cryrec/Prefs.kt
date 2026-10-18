@@ -36,6 +36,10 @@ class Prefs(context: Context) {
     var bubbleRight: Boolean
         get() = sp.getBoolean("bubble_right", true)
         set(v) = sp.edit().putBoolean("bubble_right", v).apply()
+    /** Floating mic height above the keyboard, in dp. */
+    var bubbleLift: Int
+        get() = sp.getInt("bubble_lift_dp", 84)
+        set(v) = sp.edit().putInt("bubble_lift_dp", v).apply()
     var updateApi: String
         get() = sp.getString("update_api", "")!!
         set(v) = sp.edit().putString("update_api", v).apply()

@@ -25,8 +25,8 @@ import android.widget.Toast
 import kotlin.math.abs
 
 /**
- * Floating dictation button. Shows just above the keyboard while you type, in any app.
- * Tap: start; tap again: stop and send. Long press: cancel. Drag left/right: switch side.
+ * Floating dictation button. Shows a little above the keyboard while you type, in any app.
+ * Tap: start; tap again: stop and send. Long press: cancel. Drag: move it (side and height are remembered).
  * The text goes into the focused field (set text, or paste), or to the clipboard if there is none.
  */
 class BubbleService : AccessibilityService(), Dictation.Listener {
@@ -41,6 +41,9 @@ class BubbleService : AccessibilityService(), Dictation.Listener {
     private var shown = false
     private val checkFocus = Runnable { updateVisibility() }
     private val checkFocusLate = Runnable { updateVisibility() }
+    /** While shown, look again every second so a missed "keyboard closed" event can't leave it stuck. */
+    private val poll = Runnable { updateVisibility() }
+    private var keyboardTop = 0  // px from the bottom of the screen to the top of the keyboard
 
     override fun onServiceConnected() {
         wm = getSystemService(WindowManager::class.java)
@@ -59,38 +62,59 @@ class BubbleService : AccessibilityService(), Dictation.Listener {
     override fun onInterrupt() {}
 
     override fun onDestroy() {
+        ui.removeCallbacksAndMessages(null)
         if (::dictation.isInitialized) dictation.cancel()
         root?.let { if (shown) wm.removeView(it) }
         super.onDestroy()
     }
 
-    private fun focusedField(): AccessibilityNodeInfo? =
-        findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.takeIf { it.isEditable }
+    /**
+     * The text field being typed in. Chrome and other web views report the page container as the
+     * input focus, so when that isn't editable, look inside the active window for a focused editable node.
+     */
+    private fun focusedField(): AccessibilityNodeInfo? {
+        val f = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        if (f?.isEditable == true) return f
+        val root = (f ?: windows.firstOrNull { it.isActive }?.root) ?: return null
+        val queue = ArrayDeque<AccessibilityNodeInfo>().apply { add(root) }
+        var seen = 0
+        while (queue.isNotEmpty() && seen++ < 3000) {
+            val n = queue.removeFirst()
+            if (n.isEditable && n.isFocused) return n
+            for (i in 0 until n.childCount) n.getChild(i)?.let { queue.add(it) }
+        }
+        return null
+    }
 
     /**
-     * Visible only while a keyboard is on screen for a text field, sitting just above it
+     * Visible only while a keyboard is on screen, floating a little above it
      * (and always while recording or sending, so a hidden keyboard can't strand a dictation).
+     * Any keyboard counts: some apps and web pages never report which field has focus.
      */
     private fun updateVisibility() {
+        ui.removeCallbacks(poll)
         val ime = windows.firstOrNull { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD }
         val ownKeyboard = ime?.root?.packageName == packageName  // our keyboard has its own mic
-        val typing = ime != null && !ownKeyboard && focusedField() != null && Prefs(this).configured
+        val typing = ime != null && !ownKeyboard && Prefs(this).configured
         val want = dictation.recording || dictation.sending || typing
         val v = root ?: return
         if (ime != null && typing) {
             val r = android.graphics.Rect().also { ime.getBoundsInScreen(it) }
-            val y = wm.currentWindowMetrics.bounds.height() - r.top + dp(6)
+            keyboardTop = wm.currentWindowMetrics.bounds.height() - r.top
+            val y = keyboardTop + dp(Prefs(this).bubbleLift)
             if (y != params.y) {
                 params.y = y
                 if (shown) wm.updateViewLayout(v, params)
             }
         }
-        if (want == shown) return
-        if (want) {
-            wm.addView(v, params)
-            Dictation.warmUp(this)
-        } else wm.removeView(v)
-        shown = want
+        if (want != shown) {
+            if (want) {
+                wm.addView(v, params)
+                Dictation.warmUp(this)
+            } else wm.removeView(v)
+            shown = want
+        }
+        if (shown) ui.postDelayed(poll, 1000)
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -130,7 +154,7 @@ class BubbleService : AccessibilityService(), Dictation.Listener {
         }
 
         val slop = ViewConfiguration.get(this).scaledTouchSlop
-        var downX = 0f; var downY = 0f; var dragging = false; var longPressed = false
+        var downX = 0f; var downY = 0f; var startY = 0; var dragging = false; var longPressed = false
         val longPress = Runnable {
             longPressed = true
             if (dictation.recording || dictation.sending) {
@@ -141,7 +165,7 @@ class BubbleService : AccessibilityService(), Dictation.Listener {
         bubble.setOnTouchListener { _, e ->
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    downX = e.rawX; downY = e.rawY; dragging = false; longPressed = false
+                    downX = e.rawX; downY = e.rawY; startY = params.y; dragging = false; longPressed = false
                     ui.postDelayed(longPress, ViewConfiguration.getLongPressTimeout().toLong())
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -149,15 +173,23 @@ class BubbleService : AccessibilityService(), Dictation.Listener {
                         dragging = true
                         ui.removeCallbacks(longPress)
                     }
+                    if (dragging) {  // up/down: anywhere between the keyboard and the top of the screen
+                        val top = wm.currentWindowMetrics.bounds.height() - dp(140)
+                        params.y = (startY - (e.rawY - downY)).toInt().coerceIn(keyboardTop, maxOf(keyboardTop, top))
+                        wm.updateViewLayout(root, params)
+                    }
                 }
                 MotionEvent.ACTION_UP -> {
                     ui.removeCallbacks(longPress)
                     if (dragging) {
-                        // Drag left or right to move it to that side of the keyboard.
+                        // Snap to the nearer side; remember the side and the height above the keyboard.
                         val right = e.rawX > resources.displayMetrics.widthPixels / 2
                         params.gravity = Gravity.BOTTOM or (if (right) Gravity.END else Gravity.START)
                         wm.updateViewLayout(root, params)
-                        Prefs(this).bubbleRight = right
+                        Prefs(this).apply {
+                            bubbleRight = right
+                            bubbleLift = ((params.y - keyboardTop) / resources.displayMetrics.density).toInt()
+                        }
                     } else if (!longPressed) onTap()
                 }
                 MotionEvent.ACTION_CANCEL -> ui.removeCallbacks(longPress)
