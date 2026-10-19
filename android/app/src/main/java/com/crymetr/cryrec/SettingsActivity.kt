@@ -29,6 +29,7 @@ class SettingsActivity : Activity() {
     private lateinit var form: LinearLayout
     private lateinit var bubbleState: TextView
     private lateinit var updateState: TextView
+    private lateinit var autoUpdate: CheckBox
     private lateinit var allowInstalls: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -100,6 +101,12 @@ class SettingsActivity : Activity() {
         header("Updates")
         hint("CryRec checks GitHub twice a day and installs new versions by itself, never while it records or dictates. " +
             "Android asks you to confirm the first update; later ones go through on their own.")
+        autoUpdate = CheckBox(this).apply {
+            text = "Check GitHub for updates automatically"
+            isChecked = p.autoUpdate
+            setTextColor(getColor(R.color.text))
+        }
+        form.addView(autoUpdate)
         updateState = hint("")
         val ub = LinearLayout(this)
         ub.addView(button("Check now") {
@@ -147,6 +154,7 @@ class SettingsActivity : Activity() {
         p.myName = name.text.toString()
         p.polish = polish.isChecked
         p.vocabulary = vocab.text.toString()
+        p.autoUpdate = autoUpdate.isChecked
     }
 
     private fun header(t: String) = form.addView(TextView(this).apply {

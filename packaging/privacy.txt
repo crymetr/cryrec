@@ -1,0 +1,14 @@
+CryRec privacy
+
+CryRec records and stores audio on this computer only. It has no telemetry and no account.
+
+Audio, transcripts and notes leave this computer only when you set it up that way:
+- "My server": to the CryRec server address you enter.
+- "Online API" / "Cloud AI": to the API service whose address and key you enter. That service's own privacy policy applies.
+- "Ollama": to the Ollama address you enter.
+
+Two connections happen without such a setting:
+- Update check: CryRec asks GitHub (api.github.com) for the newest release on start and every hour. Turn it off in Settings > General > "Check GitHub for updates automatically".
+- Speech model download: the first time you transcribe with "This PC", CryRec downloads the model from Hugging Face (huggingface.co). No audio is sent.
+
+Full text: https://github.com/crymetr/cryrec#privacy

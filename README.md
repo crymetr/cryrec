@@ -133,6 +133,30 @@ Each recording gets its own folder under the save location (installed: `Document
 - `transcript.raw.txt`: the transcript before Clean up, when Clean up is on
 - `notes.md`: meeting notes, when a notes engine is picked
 
+## Privacy
+
+CryRec has no telemetry and no account. Recordings, transcripts and notes stay on your device unless you pick an engine that sends them somewhere:
+
+- **My server**: audio and transcripts go to the CryRec server address you enter (your own machine).
+- **Online API** / **Cloud AI**: audio or transcript text goes to the API service whose address and key you enter. That service's own privacy policy applies (for example Groq or OpenAI).
+- **Ollama**: transcript text goes to the Ollama address you enter.
+
+Two connections happen without such a setting:
+
+- **Update check**: the desktop app asks GitHub (`api.github.com`) for the newest release on start and every hour; the Android app every 12 hours. Nothing about you or your recordings is sent. Turn it off under Settings > General (desktop) or Settings > Updates (Android) > "Check GitHub for updates automatically". "Check now" still works.
+- **Speech model download**: the first time you transcribe with **This PC**, the model is downloaded from Hugging Face (`huggingface.co`). No audio is sent.
+
+The installer shows this notice before it installs.
+
+## Code signing policy
+
+Windows releases (`CryRec.exe`, the installer and the portable zip) are built by [GitHub Actions](.github/workflows/release.yml) straight from this repository. Signing them through the [SignPath Foundation](https://signpath.org) open source program has been applied for; until then they are unsigned. The Android APK is signed with the project's own key.
+
+- Committers and reviewers: [repository contributors](https://github.com/crymetr/cryrec/graphs/contributors)
+- Approvers: [owner](https://github.com/crymetr)
+
+Every release tag is approved by hand before it is published. See [Privacy](#privacy) for what the app sends over the network.
+
 ## Develop
 
 ```

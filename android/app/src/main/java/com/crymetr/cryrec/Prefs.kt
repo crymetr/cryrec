@@ -40,6 +40,9 @@ class Prefs(context: Context) {
     var bubbleLift: Int
         get() = sp.getInt("bubble_lift_dp", 84)
         set(v) = sp.edit().putInt("bubble_lift_dp", v).apply()
+    var autoUpdate: Boolean
+        get() = sp.getBoolean("auto_update", true)
+        set(v) = sp.edit().putBoolean("auto_update", v).apply()
     var updateApi: String
         get() = sp.getString("update_api", "")!!
         set(v) = sp.edit().putString("update_api", v).apply()

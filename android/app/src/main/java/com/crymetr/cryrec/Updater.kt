@@ -56,6 +56,7 @@ object Updater {
     @Synchronized
     fun check(c: Context, force: Boolean = false): String {
         val p = Prefs(c)
+        if (!force && !p.autoUpdate) return "Automatic update checks are off."
         if (!force && System.currentTimeMillis() - p.lastUpdateCheck < 10 * 60_000L) return "Checked a moment ago."
         val release = try {
             JSONObject(URL(apiUrl(c)).readText())

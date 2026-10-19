@@ -42,7 +42,7 @@ import summarize as sm
 import transcribe as tr
 
 APP = "CryRec"
-VERSION = "0.10.3"
+VERSION = "0.10.4"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -162,10 +162,11 @@ class Updater:
         finally:
             self._lock.release()
 
-    def start_background(self):
+    def start_background(self, enabled=lambda: True):
         def loop():
             while True:
-                self.check()
+                if enabled():  # Settings > General > "Check for updates automatically"
+                    self.check()
                 time.sleep(UPDATE_EVERY)
         threading.Thread(target=loop, daemon=True).start()
 
@@ -824,6 +825,7 @@ class SettingsDialog:
         ttk.Label(g, textvariable=self.upd_msg, style="Muted.TLabel").grid(row=row, column=1, sticky="w", padx=(px(10), 0))
         self.upd_btn = ttk.Button(g, text="Check now", command=self._check_updates)
         self.upd_btn.grid(row=row, column=2, sticky="e")
+        self.auto_upd = self._check(g, "general", "Check GitHub for updates automatically", cfg.get("auto_update", True))
 
         # ---- Transcript
         t = tabs["transcript"]
@@ -1065,7 +1067,7 @@ class SettingsDialog:
             ollama_model=self.o_model.get().strip(), watch_calls=self.watch.get(),
             silence_minutes=_int(self.silence.get(), 5, 0, 60), dictation_enabled=self.dict_on.get(),
             dictation_hotkey=self._key(self.dict_key), dictation_polish=self._key(self.polish),
-            polish_model=self.polish_model.get().strip())
+            polish_model=self.polish_model.get().strip(), auto_update=self.auto_upd.get())
         if self.autostart.get() != autostart_enabled():
             set_autostart(self.autostart.get())
         secret_set(self.cfg, "server_key", self.s_key.get().strip())
@@ -1208,7 +1210,7 @@ class App:
         self.t_busy = False
         threading.Thread(target=self._transcribe_worker, daemon=True).start()
         self.updater = Updater(lambda v: root.after(0, lambda: self.update_ready(v)))
-        self.updater.start_background()
+        self.updater.start_background(lambda: self.cfg.get("auto_update", True))
 
         self.load_devices()
         self.refresh_recent(force=True)

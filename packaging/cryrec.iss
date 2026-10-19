@@ -20,6 +20,7 @@ WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 AppSupportURL=https://github.com/crymetr/cryrec
+InfoBeforeFile=privacy.txt
 ; PrepareToInstall waits on the app mutex instead. Never force-kill: it could be recording.
 CloseApplications=no
 RestartApplications=no
