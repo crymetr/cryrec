@@ -4,6 +4,10 @@ Windows meeting recorder. Pick a mic and a speaker, press Record. CryRec saves b
 
 Windows 10/11 (it records system audio through WASAPI loopback). There is also a small [Android app](#android) that records with the phone's mic and dictates in any app, using your CryRec server.
 
+[![CryRec trailer](docs/promo.gif)](https://cryme.tr/cryrec/)
+
+_[Watch the trailer with sound](https://cryme.tr/cryrec/)_
+
 ## Install
 
 Two options, both from the Releases page or `dist\`:
