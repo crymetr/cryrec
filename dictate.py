@@ -14,6 +14,7 @@ import numpy as np
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+ole32 = ctypes.WinDLL("ole32")
 
 VK_CONTROL, VK_SHIFT, VK_MENU, VK_ESCAPE, VK_V = 0x11, 0x10, 0x12, 0x1B, 0x56
 VK_LWIN, VK_RWIN, VK_RCONTROL = 0x5B, 0x5C, 0xA3
@@ -65,6 +66,8 @@ class HotkeyWatcher:
         self.running = False
 
     def _loop(self):
+        # on_start opens the mic from this thread; WASAPI fails (-9999) on a thread without COM
+        ole32.CoInitializeEx(None, 0)  # COINIT_MULTITHREADED
         state, t0, announced, stuck = "idle", 0.0, False, frozenset()
         while self.running:
             time.sleep(0.02)
