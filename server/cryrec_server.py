@@ -38,6 +38,7 @@ import shutil
 import sys
 import threading
 import time
+import urllib.request
 import uuid
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -48,7 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import summarize as sm  # noqa: E402
 import transcribe as tr  # noqa: E402
 
-VERSION = "0.9.0"
+VERSION = "0.9.1"
 APPDATA = Path(os.environ.get("APPDATA", Path.home())) / "CryRec"
 LOCALAPPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "CryRec"
 DEFAULTS = {
@@ -243,6 +244,23 @@ class Jobs:
         job["md"] = eng.notes(job.pop("transcript"), job["my_name"], job["language"], prog,
                               job["cancel"].is_set, glossary)
 
+    def _free_ollama(self):
+        """Dictation must not wait behind a local LLM holding the GPU: unload whatever a local Ollama has loaded.
+        Ollama reloads a model by itself on its next request."""
+        url = (self.cfg.get("ollama_url") or "").rstrip("/")
+        if urlparse(url).hostname not in ("127.0.0.1", "localhost"):
+            return
+        try:
+            with urllib.request.urlopen(url + "/api/ps", timeout=3) as r:
+                names = [m["name"] for m in json.load(r).get("models", [])]
+            for name in names:
+                body = json.dumps({"model": name, "keep_alive": 0}).encode()
+                urllib.request.urlopen(urllib.request.Request(url + "/api/generate", data=body,
+                                       headers={"Content-Type": "application/json"}), timeout=10).close()
+                log(f"unloaded ollama model {name} for dictation")
+        except Exception as e:
+            log(f"could not free ollama: {e!r}")
+
     def _load_engine(self, engine, job):
         if not tr.model_ready(self.cfg["models_dir"], self.cfg["model"]):
             tr.download_model(self.cfg["models_dir"], self.cfg["model"],
@@ -263,6 +281,7 @@ class Jobs:
                 continue
             job = self.get(job_id)
             if job and job.get("kind") == "warm":  # someone pressed the dictation key: load now
+                self._free_ollama()
                 try:
                     engine = self._load_engine(engine, job)
                 except Exception as e:
@@ -271,6 +290,7 @@ class Jobs:
                 continue
             if job and job.get("kind") == "dictate":
                 t0 = time.time()
+                self._free_ollama()
                 try:
                     engine = self._load_engine(engine, job)
                     self._run_dictate(job, engine)
