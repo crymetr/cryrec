@@ -5,7 +5,8 @@
 
 Put it behind HTTPS (Cloudflare Tunnel, Tailscale, a reverse proxy) before exposing it.
 Config: %APPDATA%\\CryRec\\server.json (or --config PATH). Keys: key, host, port, model,
-device (auto|cuda|cpu), models_dir, jobs_dir, keep_hours, log_file.
+device (auto|cuda|cpu), models_dir, jobs_dir, keep_hours, log_file, ollama_preempt (true = dictation stops
+a request a local Ollama is still running, so both don't share the GPU; needs psutil).
 
 API (all need "Authorization: Bearer <key>"):
     GET    /health            {ok, version, model, device}
@@ -49,7 +50,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import summarize as sm  # noqa: E402
 import transcribe as tr  # noqa: E402
 
-VERSION = "0.9.1"
+VERSION = "0.9.2"
 APPDATA = Path(os.environ.get("APPDATA", Path.home())) / "CryRec"
 LOCALAPPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "CryRec"
 DEFAULTS = {
@@ -65,6 +66,8 @@ DEFAULTS = {
     "ollama_url": sm.DEFAULT_OLLAMA_URL,
     "ollama_model": sm.DEFAULT_OLLAMA_MODEL,
     "ollama_ctx": 8192,
+    # dictation first: stop a request a local Ollama is still running on the GPU (needs psutil)
+    "ollama_preempt": False,
     "anthropic_api_key": "",
     "claude_model": sm.DEFAULT_CLAUDE_MODEL,
     # terms and "wrong -> right" fixes used for every job, merged with the client's own list
@@ -98,6 +101,37 @@ def gpu_info():
         pass
     _gpu_cache.update(t=time.time(), info=info)
     return info
+
+
+def _ollama_call(url, path, body=None):
+    """GET (no body) or POST JSON to a local Ollama; returns the first JSON object of the reply ({} if empty)."""
+    req = urllib.request.Request(url + path, data=None if body is None else json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        lines = r.read().decode("utf-8", errors="replace").strip().splitlines()
+    return json.loads(lines[0]) if lines else {}
+
+
+def _stop_ollama_runner(url, name):
+    """Kill the Ollama runner process(es) serving `name`, found by its weights file on their command line.
+    Ollama starts a fresh runner on the next request for that model."""
+    try:
+        import psutil
+    except ImportError:
+        log("ollama_preempt needs psutil (pip install psutil)")
+        return 0
+    blobs = set(re.findall(r"sha256-[0-9a-f]{64}", _ollama_call(url, "/api/show", {"model": name}).get("modelfile", "")))
+    n = 0
+    for p in psutil.process_iter(["name"]) if blobs else ():
+        if not re.search(r"llama|ollama", p.info["name"] or "", re.I):  # reading every command line takes seconds
+            continue
+        try:
+            if any(b in " ".join(p.cmdline()) for b in blobs):
+                p.kill()
+                n += 1
+        except psutil.Error:
+            pass
+    return n
 
 
 def log(msg):
@@ -246,18 +280,29 @@ class Jobs:
 
     def _free_ollama(self):
         """Dictation must not wait behind a local LLM holding the GPU: unload whatever a local Ollama has loaded.
-        Ollama reloads a model by itself on its next request."""
+        Ollama reloads a model by itself on its next request. An unload waits for a request that is already
+        running, so with ollama_preempt on, a model still loaded after that has its runner process stopped
+        (that request fails; its caller has to retry)."""
         url = (self.cfg.get("ollama_url") or "").rstrip("/")
         if urlparse(url).hostname not in ("127.0.0.1", "localhost"):
             return
+        # "localhost" tries IPv6 first; Ollama listens on 127.0.0.1 only, so every call waited ~2 s on Windows
+        url = url.replace("://localhost", "://127.0.0.1", 1)
         try:
-            with urllib.request.urlopen(url + "/api/ps", timeout=3) as r:
-                names = [m["name"] for m in json.load(r).get("models", [])]
+            names = [m["name"] for m in _ollama_call(url, "/api/ps").get("models", [])]
             for name in names:
-                body = json.dumps({"model": name, "keep_alive": 0}).encode()
-                urllib.request.urlopen(urllib.request.Request(url + "/api/generate", data=body,
-                                       headers={"Content-Type": "application/json"}), timeout=10).close()
+                _ollama_call(url, "/api/generate", {"model": name, "keep_alive": 0})
                 log(f"unloaded ollama model {name} for dictation")
+            if not names or not self.cfg.get("ollama_preempt"):
+                return
+            for _ in range(4):  # an idle model is gone within a moment; a busy one stays until its request ends
+                time.sleep(0.25)
+                busy = [m["name"] for m in _ollama_call(url, "/api/ps").get("models", []) if m["name"] in names]
+                if not busy:
+                    return
+            for name in busy:
+                n = _stop_ollama_runner(url, name)
+                log(f"stopped a running ollama request on {name} for dictation ({n} process{'es' * (n != 1)})")
         except Exception as e:
             log(f"could not free ollama: {e!r}")
 

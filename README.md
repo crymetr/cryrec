@@ -101,6 +101,7 @@ The server only listens on localhost. Put HTTPS in front of it (Cloudflare Tunne
 
 - Audio is deleted right after each job; finished transcripts and notes are dropped after 24 hours (`keep_hours`).
 - The model is loaded when work comes in and released when the queue is empty, so the GPU stays free for other work. After a dictation it stays loaded for `keep_warm_minutes` (10) so the next one is quick, and dictation jumps ahead of long meeting jobs.
+- Before a dictation the server unloads whatever a local Ollama has loaded. If another app is in the middle of an Ollama request, set `ollama_preempt: true` (needs `pip install psutil`) to stop that request, so dictation does not share the GPU with it. The stopped request fails and its app has to retry.
 - The Android app uploads one AAC track (`meeting.m4a`, 48 kbps, about 22 MB per hour).
 - Uploads are MP3, 64 kbps per track for meetings up to about 1.5 hours. Longer meetings get a lower bitrate (down to 16 kbps), so one 95 MB upload holds up to about 6 hours.
 - `vocabulary_file` (default `%APPDATA%\CryRec\vocabulary.txt`) is merged with each client's vocabulary.
