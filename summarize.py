@@ -240,7 +240,7 @@ Answer with the cleaned text only, without tags or quotes."""
 
 def polish_dictation(raw, claude, glossary=()):
     text, stop = claude.ask(_polish_system(glossary), f"<dictation>\n{raw}\n</dictation>", lambda: False,
-                            effort="low", max_tokens=4000)
+                            effort="low", max_tokens=16000)  # ~15 min of speech
     text = text.strip()
     if text.startswith("<dictation>"):
         text = text.removeprefix("<dictation>").removesuffix("</dictation>").strip()

@@ -28,7 +28,7 @@ HOTKEYS = {
     "Right Ctrl": [(VK_RCONTROL,)],
 }
 TAP_SEC = 0.35      # released faster than this = tap (start/stop mode); longer = hold to talk
-MAX_SEC = 300       # a forgotten tap-mode dictation stops by itself
+MAX_SEC = 900       # a forgotten tap-mode dictation stops by itself
 MIN_SEC = 0.4       # shorter clips are ignored (accidental presses)
 
 

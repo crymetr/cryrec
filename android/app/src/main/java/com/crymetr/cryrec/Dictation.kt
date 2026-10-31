@@ -114,7 +114,7 @@ class Dictation(private val context: Context, private val listener: Listener) {
     }
 
     companion object {
-        const val MAX_SECONDS = 300L
+        const val MAX_SECONDS = 900L
         /** A dictation is recording or waiting for text (the updater waits for it). */
         @Volatile var busy = false
         private var lastWarm = 0L

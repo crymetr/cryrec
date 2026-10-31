@@ -408,12 +408,23 @@ def remote_transcribe(session_dir, url, key, language, progress, cancel, vocabul
 
 
 def remote_dictate(url, key, audio, language, polish, model, vocabulary=""):
-    """Short 16 kHz clip -> {"text", "raw", "polished"} from a CryRec server, in one request."""
+    """16 kHz clip -> {"text", "raw", "polished"} from a CryRec server. Short clips answer on the
+    same request; a long one comes back as {id} and is polled until done."""
     import base64
+    url = url.rstrip("/")
     body = json.dumps({"audio_b64": base64.b64encode(encode_mp3(audio, 64)).decode(), "ext": "mp3",
                        "language": language, "polish": bool(polish), "model": model or "",
                        "vocabulary": vocabulary or ""}).encode()
-    return _server_call(url.rstrip("/") + "/dictate", key, data=body, content_type="application/json")
+    r = _server_call(url + "/dictate", key, data=body, content_type="application/json")
+    if "text" in r:
+        return r
+    while True:
+        time.sleep(2)
+        st = _server_call(f"{url}/jobs/{r['id']}", key)
+        if st["status"] == "done":
+            return {"text": st["result"], "raw": st["raw"], "polished": st["polished"]}
+        if st["status"] == "failed":
+            raise RuntimeError(f"Server: {st.get('error')}")
 
 
 def server_warm(url, key):
