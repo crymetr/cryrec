@@ -164,12 +164,32 @@ class LocalEngine:
             from faster_whisper import BatchedInferencePipeline
             self.batched = BatchedInferencePipeline(self.model)
 
+    def park(self):
+        """Give the GPU memory back but keep the weights in RAM: resume() takes ~0.5 s, a fresh load ~30 s."""
+        if self.device == "gpu" and self.model.model.model_is_loaded:
+            self.model.model.unload_model(to_cpu=True)
+
+    def resume(self):
+        if not self.model.model.model_is_loaded:
+            self.model.model.load_model()
+
+    @property
+    def parked(self):
+        return not self.model.model.model_is_loaded
+
     def quick_text(self, audio, lang, terms=()):
         """Dictation: short clip, no word timing. Beam 5 costs ~0.15 s per clip on a GPU and gets more words right."""
-        segs, _info = self.model.transcribe(
-            audio, language=None if lang in (None, "mixed") else lang, beam_size=5,
-            vad_filter=True, vad_parameters={"min_silence_duration_ms": 500},
-            condition_on_previous_text=False, without_timestamps=True, hotwords=hotword_prompt(terms))
+        opts = dict(language=None if lang in (None, "mixed") else lang, beam_size=5,
+                    vad_filter=True, vad_parameters={"min_silence_duration_ms": 500},
+                    condition_on_previous_text=False, without_timestamps=True, hotwords=hotword_prompt(terms))
+        if self.batched and len(audio) > 30 * SAMPLE_RATE:  # long dictation: several 30 s windows at once
+            try:
+                return " ".join(s.text.strip() for s in self.batched.transcribe(audio, batch_size=BATCH_SIZE, **opts)[0])
+            except RuntimeError as e:
+                if "out of memory" not in str(e).lower():
+                    raise
+                self.batched = None
+        segs, _info = self.model.transcribe(audio, **opts)
         return " ".join(s.text.strip() for s in segs)
 
     def segments(self, audio, lang, on_progress, cancel, terms=(), mic=False):

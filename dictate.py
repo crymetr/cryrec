@@ -78,7 +78,8 @@ class HotkeyWatcher:
                     if down:
                         state, t0, announced = "pressed", now, False
                         stuck = frozenset(keys_down(self.groups))
-                        self.on_start()
+                        if self.on_start() is False:  # no mic: don't wait for a second press that stops nothing
+                            state = "wait_release"
                 elif state == "pressed":
                     if other_key_down(self.groups, stuck):
                         state = "wait_release"

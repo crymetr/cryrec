@@ -44,7 +44,7 @@ import summarize as sm
 import transcribe as tr
 
 APP = "CryRec"
-VERSION = "0.11.0"
+VERSION = "0.12.0"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -586,6 +586,7 @@ class DictationUI:
         except Exception:
             self.rec = None
             self._show("No microphone found for dictation.", hide_after=3, kind="error")
+            return False
 
     def _mode(self, mode):
         if not self.rec:

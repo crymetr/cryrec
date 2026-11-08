@@ -104,6 +104,9 @@ class _ChunkedNotes:
         return self._ask(system, MERGE_PROMPT + joined, cancel)
 
 
+_CLIENTS = {}
+
+
 class ClaudeNotes:
     def __init__(self, key, model=DEFAULT_CLAUDE_MODEL):
         self.key = key
@@ -119,7 +122,9 @@ class ClaudeNotes:
     def ask(self, system, user, cancel, effort="medium", max_tokens=16000):
         """One streamed request. Returns (text, stop_reason)."""
         import anthropic
-        client = anthropic.Anthropic(api_key=self.key, max_retries=3)
+        client = _CLIENTS.get(self.key)
+        if client is None:  # one client per key: its connection pool skips a TLS handshake per dictation
+            client = _CLIENTS[self.key] = anthropic.Anthropic(api_key=self.key, max_retries=3)
         req = dict(model=self.model, max_tokens=max_tokens, system=system,
                    messages=[{"role": "user", "content": user}], output_config={"effort": effort})
         try:
@@ -238,13 +243,45 @@ just clean it up.
 Answer with the cleaned text only, without tags or quotes."""
 
 
+POLISH_CHUNK_CHARS = 500  # long dictations are polished in parallel parts: wall time ~ one part
+
+
 def polish_dictation(raw, claude, glossary=()):
+    parts = _sentence_chunks(raw, POLISH_CHUNK_CHARS)
+    if len(parts) == 1:
+        return _polish_one(raw, claude, glossary)
+    from concurrent.futures import ThreadPoolExecutor
+    def one(p):
+        try:
+            return _polish_one(p, claude, glossary)
+        except Exception:
+            return p  # keep this part as heard rather than lose the whole dictation
+    with ThreadPoolExecutor(max_workers=min(8, len(parts))) as pool:
+        return " ".join(pool.map(one, parts))
+
+
+def _polish_one(raw, claude, glossary):
     text, stop = claude.ask(_polish_system(glossary), f"<dictation>\n{raw}\n</dictation>", lambda: False,
                             effort="low", max_tokens=16000)  # ~15 min of speech
     text = text.strip()
     if text.startswith("<dictation>"):
         text = text.removeprefix("<dictation>").removesuffix("</dictation>").strip()
     return text if text and stop != "max_tokens" else raw
+
+
+def _sentence_chunks(text, size):
+    """Split at sentence ends into parts of about `size` characters (a sentence is never cut)."""
+    import re
+    parts, cur = [], ""
+    for s in re.split(r"(?<=[.!?…])\s+", text.strip()):
+        if cur and len(cur) + len(s) + 1 > size:
+            parts.append(cur)
+            cur = s
+        else:
+            cur = f"{cur} {s}" if cur else s
+    if cur:
+        parts.append(cur)
+    return parts or [text]
 
 
 def remote_notes(url, key, transcript, backend, language, my_name, progress, cancel, vocabulary=""):

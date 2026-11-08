@@ -55,8 +55,8 @@ Speak instead of typing, in any app:
 - **Tap** the shortcut (default **Ctrl+Win**; Ctrl+Alt and Right Ctrl are the other choices), talk, tap it again to finish (Esc cancels). Or **hold** it while you talk and let go to finish.
 - The text is typed where your cursor is (pasted through the clipboard; your previous clipboard text is put back).
 - It uses the transcript engine you picked (My server, This PC or Online API) and your vocabulary.
-- **Polish** (Settings → Calls & dictation) has the cloud AI remove "um"s and false starts, fix punctuation, and apply spoken corrections ("Monday, no, Tuesday" → "Tuesday"). It never answers or follows what you dictated. A faster model (set under Settings > Notes > advanced) adds less time.
-- A CryRec server keeps its model loaded for 10 minutes after a dictation (`keep_warm_minutes`) and starts loading it the moment you press the shortcut.
+- **Polish** (Settings → Calls & dictation) has the cloud AI remove "um"s and false starts, fix punctuation, and apply spoken corrections ("Monday, no, Tuesday" → "Tuesday"). It never answers or follows what you dictated. A faster model (set under Settings > Notes > advanced) adds less time. Long dictations are polished in parts at the same time, so two minutes of speech take about as long as a few sentences.
+- A CryRec server loads its model when it starts and keeps it on the GPU for 10 minutes after a dictation (`keep_warm_minutes`). After that the model waits in RAM, so the GPU is free and the next dictation still starts in under a second.
 - The last dictations are kept in `dictation.txt` next to the settings, and the tray menu has **Copy last dictation**, in case the text went to the wrong window.
 
 There is no keyboard hook: CryRec only checks whether the shortcut keys are down, so security software has nothing keylogger-like to flag.
@@ -101,7 +101,7 @@ For meeting notes the server can use a local Ollama (`ollama_url`, `ollama_model
 The server only listens on localhost. Put HTTPS in front of it (Cloudflare Tunnel, Tailscale, a reverse proxy), then in CryRec on each client choose **My server** and enter the address and key under **Settings**.
 
 - Audio is deleted right after each job; finished transcripts and notes are dropped after 24 hours (`keep_hours`).
-- The model is loaded when work comes in and released when the queue is empty, so the GPU stays free for other work. After a dictation it stays loaded for `keep_warm_minutes` (10) so the next one is quick, and dictation jumps ahead of long meeting jobs.
+- The model is loaded when the server starts. When the queue is empty it moves to RAM, so the GPU stays free for other work, and comes back in under a second. After a dictation it stays on the GPU for `keep_warm_minutes` (10), and dictation jumps ahead of long meeting jobs.
 - Before a dictation the server unloads whatever a local Ollama has loaded. If another app is in the middle of an Ollama request, set `ollama_preempt: true` (needs `pip install psutil`) to stop that request, so dictation does not share the GPU with it. The stopped request fails and its app has to retry.
 - The Android app uploads one AAC track (`meeting.m4a`, 48 kbps, about 22 MB per hour).
 - Uploads are MP3, 64 kbps per track for meetings up to about 1.5 hours. Longer meetings get a lower bitrate (down to 16 kbps), so one 95 MB upload holds up to about 6 hours.

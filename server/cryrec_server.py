@@ -50,7 +50,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import summarize as sm  # noqa: E402
 import transcribe as tr  # noqa: E402
 
-VERSION = "0.10.0"
+VERSION = "0.11.0"
 APPDATA = Path(os.environ.get("APPDATA", Path.home())) / "CryRec"
 LOCALAPPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "CryRec"
 DEFAULTS = {
@@ -314,10 +314,27 @@ class Jobs:
             engine = tr.LocalEngine(self.cfg["models_dir"], self.cfg["model"], self.cfg["device"])
             self.device = engine.device
             log(f"model {self.cfg['model']} loaded on {engine.device}")
+        elif engine.parked:
+            t0 = time.time()
+            engine.resume()
+            self.device = engine.device
+            log(f"model back on {engine.device} in {time.time() - t0:.1f}s")
         return engine
 
     def _worker(self):
         engine = None
+        if tr.model_ready(self.cfg["models_dir"], self.cfg["model"]):
+            try:  # load once at start; it is parked in RAM after keep_warm_minutes, so no dictation waits ~25 s
+                engine = self._load_engine(None, {"cancel": threading.Event()})
+                t0 = time.time()  # first decode / VAD / Claude import in a fresh process cost ~30 s: pay it now
+                tmp = self.root / "warm.mp3"
+                tmp.write_bytes(tr.encode_mp3(tr.np.zeros(tr.SAMPLE_RATE, tr.np.float32)))
+                engine.quick_text(tr.load_audio(tmp), "en", ["CryRec"])
+                tmp.unlink(missing_ok=True)
+                import anthropic  # noqa: F401
+                log(f"dictation path warmed in {time.time() - t0:.1f}s")
+            except Exception as e:
+                log(f"preload failed: {e!r}")
         while True:
             try:
                 _, _, job_id = self.q.get(timeout=30)
@@ -355,9 +372,8 @@ class Jobs:
             if job.get("kind") in ("notes", "clean"):
                 job["status"], job["text"] = "running", "working on the transcript"
                 if job["backend"] == "local" and engine is not None:
-                    engine = None  # free Whisper's GPU memory for the local LLM
+                    engine.park()  # free Whisper's GPU memory for the local LLM (weights stay in RAM)
                     self.device = "idle"
-                    gc.collect()
                 try:
                     self._run_text_job(job)
                     job["status"], job["progress"] = "done", 1.0
@@ -392,6 +408,12 @@ class Jobs:
         """Give the GPU memory back when idle, but stay loaded a while after dictation (it needs to be quick)."""
         warm = float(self.cfg.get("keep_warm_minutes", 10)) * 60
         if engine is not None and self.q.empty() and time.time() - self.last_dictate > warm:
+            if engine.device == "gpu":
+                if not engine.parked:
+                    engine.park()  # VRAM back, weights stay in RAM: the next dictation starts in ~0.5 s
+                    self.device = "idle"
+                    log("model parked in RAM")
+                return engine
             self.device = "idle"
             gc.collect()
             return None
