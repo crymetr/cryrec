@@ -44,7 +44,7 @@ import summarize as sm
 import transcribe as tr
 
 APP = "CryRec"
-VERSION = "0.12.0"
+VERSION = "0.13.0"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -582,6 +582,8 @@ class DictationUI:
                              daemon=True).start()
         try:
             self.rec = dictate.Recorder(self.app.pa, self.app.dictation_device())
+            run_cfg = dict(cfg)
+            self.chunks = dictate.ChunkedDictation(self.rec, lambda audio: run_dictation(run_cfg, audio, self.cache))
             self._show("Listening...")
         except Exception:
             self.rec = None
@@ -597,24 +599,26 @@ class DictationUI:
     def _cancel(self):
         if self.rec:
             self.rec.stop()
+            self.chunks.cancel()
             self.rec = None
         self._hide()
 
     def _stop(self):
         if not self.rec:
             return
-        audio, self.rec = self.rec.stop(), None
-        if len(audio) < dictate.MIN_SEC * 16000 or float(np.abs(audio).max(initial=0)) < 0.01:
+        self.rec.stop()
+        self.rec = None
+        if not self.chunks.close():
+            self.chunks.cancel()
             self._hide()
             return
         self._show("Writing...", kind="busy")
-        threading.Thread(target=self._process, args=(audio, self.target), daemon=True).start()
+        threading.Thread(target=self._process, args=(self.chunks, self.target), daemon=True).start()
 
-    def _process(self, audio, target):
-        try:
-            text = run_dictation(dict(self.app.cfg), audio, self.cache)
-        except Exception as e:
-            self._show(f"Dictation failed: {e}"[:110], hide_after=5, kind="error")
+    def _process(self, chunks, target):
+        text, error = chunks.finish()
+        if error and not text:
+            self._show(f"Dictation failed: {error}"[:110], hide_after=5, kind="error")
             return
         if not text:
             self._show("Nothing heard.", hide_after=2, kind="error")
@@ -625,7 +629,10 @@ class DictationUI:
                 f.write(f"[{datetime.now():%Y-%m-%d %H:%M}] {text}\n")
         except OSError:
             pass
-        self._hide()
+        if error:
+            self._show(f"A part of the dictation is missing: {error}"[:110], hide_after=8, kind="error")
+        else:
+            self._hide()
         dictate.paste_text(text, target)
 
 

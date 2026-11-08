@@ -8,6 +8,7 @@ language, and the previous clipboard text is put back afterwards.
 import ctypes
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from ctypes import wintypes
 
 import numpy as np
@@ -118,6 +119,8 @@ class Recorder:
         self.rate = int(device["defaultSampleRate"])
         self.channels = max(1, min(2, int(device["maxInputChannels"])))
         self.frames = []
+        self._read = 0  # frames already handed out by drain()
+        self._resampler = None
         self.stream = pa.open(format=pyaudio.paInt16, channels=self.channels, rate=self.rate, input=True,
                               input_device_index=device["index"], frames_per_buffer=int(self.rate * 0.05),
                               stream_callback=self._cb)
@@ -133,14 +136,104 @@ class Recorder:
             self.stream.close()
         except Exception:
             pass
-        if not self.frames:
-            return np.zeros(0, np.float32)
-        x = np.frombuffer(b"".join(self.frames), dtype=np.int16).astype(np.float32) / 32768.0
+
+    def drain(self, final=False):
+        """16 kHz mono float32 recorded since the last call."""
+        n = len(self.frames)
+        raw = b"".join(self.frames[self._read:n])
+        self._read = n
+        x = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
         x = x.reshape(-1, self.channels).mean(axis=1)
         if self.rate != 16000:
             import soxr
-            x = soxr.resample(x, self.rate, 16000)
+            if self._resampler is None:
+                self._resampler = soxr.ResampleStream(self.rate, 16000, 1, dtype="float32")
+            x = self._resampler.resample_chunk(x, last=final)
         return x.astype(np.float32)
+
+
+class ChunkedDictation:
+    """Writes a long dictation while it is spoken: about every 45 s the new audio is cut at a pause and
+    sent to run(audio) -> text, so after the last word only the last part is left. Under 45 s it is one
+    part, the same as a single request. One worker keeps the parts in order and the engine single-use."""
+
+    SR = 16000
+    TARGET_SEC, FORCE_SEC = 45, 90  # cut at the first good pause after 45 s, at the quietest moment by 90 s
+    SEARCH_SEC, FRAME_SEC, QUIET_FRAMES = 15, 0.1, 5  # a pause: 0.5 s, within the last 15 s
+    MIN_PEAK = 0.01  # quieter than this is not speech
+
+    def __init__(self, rec, run):
+        self.rec, self.run = rec, run
+        self.pending = np.zeros(0, np.float32)
+        self.seconds = 0.0
+        self.peak = 0.0
+        self.parts = []  # (audio, future)
+        self.pool = ThreadPoolExecutor(max_workers=1)
+        self._stop = threading.Event()
+        self._cancelled = False
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _take(self, final=False):
+        x = self.rec.drain(final)
+        self.seconds += len(x) / self.SR
+        if len(x):
+            self.peak = max(self.peak, float(np.abs(x).max()))
+        self.pending = np.concatenate([self.pending, x])
+
+    def _loop(self):
+        while not self._stop.wait(2):
+            self._take()
+            n = self._cut_point()
+            if n:
+                self._submit(self.pending[:n])
+                self.pending = self.pending[n:]
+
+    def _cut_point(self):
+        """Sample index of a pause in the last SEARCH_SEC, or None to keep listening."""
+        if len(self.pending) < self.TARGET_SEC * self.SR:
+            return None
+        lo = len(self.pending) - self.SEARCH_SEC * self.SR
+        size = int(self.FRAME_SEC * self.SR)
+        frames = self.pending[lo:]
+        frames = frames[:len(frames) // size * size].reshape(-1, size)
+        level = np.abs(frames).mean(axis=1)
+        rolling = np.convolve(level, np.ones(self.QUIET_FRAMES) / self.QUIET_FRAMES, mode="valid")
+        i = int(np.argmin(rolling))
+        quiet = rolling[i] < max(0.002, 0.15 * float(np.median(level)))
+        if not quiet and len(self.pending) < self.FORCE_SEC * self.SR:
+            return None
+        return lo + (i + self.QUIET_FRAMES // 2) * size
+
+    def _submit(self, audio):
+        if float(np.abs(audio).max(initial=0)) >= self.MIN_PEAK:
+            self.parts.append((audio, self.pool.submit(self.run, audio)))
+
+    def close(self):
+        """Recording ended. Returns False if nothing worth writing was heard."""
+        self._stop.set()
+        self._thread.join()
+        self._take(final=True)
+        return self.seconds >= MIN_SEC and self.peak >= self.MIN_PEAK
+
+    def finish(self):
+        """Waits for every part. Returns (text, error); a part that fails twice is left out and reported."""
+        self._submit(self.pending)
+        texts, error = [], None
+        for audio, future in self.parts:
+            try:
+                texts.append(future.result())
+            except Exception:
+                try:
+                    texts.append(self.run(audio))
+                except Exception as e:
+                    error = e
+        self.pool.shutdown(wait=False)
+        return " ".join(t.strip() for t in texts if t and t.strip()), error
+
+    def cancel(self):
+        self._stop.set()
+        self.pool.shutdown(wait=False, cancel_futures=True)
 
 
 # ---------- clipboard and paste ----------

@@ -55,6 +55,7 @@ Speak instead of typing, in any app:
 - **Tap** the shortcut (default **Ctrl+Win**; Ctrl+Alt and Right Ctrl are the other choices), talk, tap it again to finish (Esc cancels). Or **hold** it while you talk and let go to finish.
 - The text is typed where your cursor is (pasted through the clipboard; your previous clipboard text is put back).
 - It uses the transcript engine you picked (My server, This PC or Online API) and your vocabulary.
+- A long dictation is written while you speak: about every 45 seconds the new audio is cut at a pause and processed, so when you finish only the last part is left, however long you talked.
 - **Polish** (Settings → Calls & dictation) has the cloud AI remove "um"s and false starts, fix punctuation, and apply spoken corrections ("Monday, no, Tuesday" → "Tuesday"). It never answers or follows what you dictated. A faster model (set under Settings > Notes > advanced) adds less time. Long dictations are polished in parts at the same time, so two minutes of speech take about as long as a few sentences.
 - A CryRec server loads its model when it starts and keeps it on the GPU for 10 minutes after a dictation (`keep_warm_minutes`). After that the model waits in RAM, so the GPU is free and the next dictation still starts in under a second.
 - The last dictations are kept in `dictation.txt` next to the settings, and the tray menu has **Copy last dictation**, in case the text went to the wrong window.
