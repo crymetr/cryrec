@@ -33,6 +33,7 @@ LANGUAGES = {
 }
 TRACKS = (("me", "Me"), ("them", "Them"))
 SAMPLE_RATE = 16000
+BATCH_SIZE = int(os.environ.get("CRYREC_BATCH", "8"))  # GPU batched decoding; 1 = one window at a time
 MERGE_GAP_SEC = 1.5
 BLEED_RATIO = 0.55
 
@@ -158,6 +159,10 @@ class LocalEngine:
         if self.model is None:
             threads = max(1, (os.cpu_count() or 4) // 2)
             self.model = WhisperModel(path, device="cpu", compute_type="int8", cpu_threads=threads)
+        self.batched = None
+        if self.device == "gpu" and BATCH_SIZE > 1:
+            from faster_whisper import BatchedInferencePipeline
+            self.batched = BatchedInferencePipeline(self.model)
 
     def quick_text(self, audio, lang, terms=()):
         """Dictation: short clip, no word timing. Beam 5 costs ~0.15 s per clip on a GPU and gets more words right."""
@@ -168,8 +173,7 @@ class LocalEngine:
         return " ".join(s.text.strip() for s in segs)
 
     def segments(self, audio, lang, on_progress, cancel, terms=(), mic=False):
-        segs, _info = self.model.transcribe(
-            audio,
+        opts = dict(
             language=None if lang in (None, "mixed") else lang,
             multilingual=lang == "mixed",
             beam_size=5,
@@ -181,6 +185,21 @@ class LocalEngine:
             word_timestamps=True,  # needed by hallucination_silence_threshold and for splitting
             hotwords=hotword_prompt(terms),  # sent with every 30 s window, unlike initial_prompt
         )
+        segs = None
+        if self.batched:  # GPU: decode several speech chunks at once (~5x faster, ~2.3 GB VRAM)
+            try:
+                segs = []
+                for s in self.batched.transcribe(audio, batch_size=BATCH_SIZE, **opts)[0]:
+                    if cancel():
+                        raise Cancelled()
+                    on_progress(s.end)
+                    segs.append(s)
+            except RuntimeError as e:
+                if "out of memory" not in str(e).lower():
+                    raise
+                self.batched = segs = None  # VRAM shared with another model: one window at a time from now on
+        if segs is None:
+            segs, _info = self.model.transcribe(audio, **opts)
         for s in segs:
             if cancel():
                 raise Cancelled()
@@ -350,6 +369,50 @@ def transcribe_session(session_dir, engine, language, progress, cancel, vocabula
     segments.sort(key=lambda s: (s["start"], s["who"]))
     txt = session_dir / "transcript.txt"
     txt.write_text(render_txt(session_dir, segments, total_dur, [l for l, _ in tracks]), encoding="utf-8")
+    (session_dir / "transcript.srt").write_text(render_srt(segments), encoding="utf-8")
+    return txt
+
+
+def live_parts(session_dir):
+    """Parts cut while recording (see live.py), or None if this folder has no finished set."""
+    try:
+        data = json.loads((Path(session_dir) / "live" / "parts.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data["parts"] if data.get("complete") and data.get("parts") else None
+
+
+def read_srt(path):
+    segs = []
+    for block in path.read_text(encoding="utf-8").strip().split("\n\n"):
+        lines = block.strip().splitlines()
+        if len(lines) < 3 or " --> " not in lines[1]:
+            continue
+        a, b = (_srt_sec(x) for x in lines[1].split(" --> "))
+        who, _, text = "\n".join(lines[2:]).partition(": ")
+        segs.append({"start": a, "end": b, "who": who, "text": text})
+    return segs
+
+
+def _srt_sec(ts):
+    h, m, rest = ts.strip().split(":")
+    s, ms = rest.split(",")
+    return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
+
+
+def merge_parts(session_dir, parts):
+    """Join live/partNNN/transcript.srt files into the folder's transcript.txt and .srt."""
+    session_dir = Path(session_dir)
+    segments = []
+    for p in parts:
+        for s in read_srt(session_dir / "live" / p["name"] / "transcript.srt"):
+            s["start"] += p["start"]
+            s["end"] += p["start"]
+            segments.append(s)
+    segments.sort(key=lambda s: (s["start"], s["who"]))
+    labels = [l for l, _ in find_tracks(session_dir)]
+    txt = session_dir / "transcript.txt"
+    txt.write_text(render_txt(session_dir, segments, parts[-1]["end"], labels), encoding="utf-8")
     (session_dir / "transcript.srt").write_text(render_srt(segments), encoding="utf-8")
     return txt
 

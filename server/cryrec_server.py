@@ -50,7 +50,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import summarize as sm  # noqa: E402
 import transcribe as tr  # noqa: E402
 
-VERSION = "0.9.2"
+VERSION = "0.10.0"
 APPDATA = Path(os.environ.get("APPDATA", Path.home())) / "CryRec"
 LOCALAPPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "CryRec"
 DEFAULTS = {

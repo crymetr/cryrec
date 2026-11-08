@@ -34,7 +34,8 @@ Keys are stored encrypted for your Windows user (DPAPI), not as plain text.
 - The local speech model downloads once on first use: Turbo (best, 1.5 GB) or Small (faster, 0.5 GB).
 - Me / Them come from the separate mic and speaker tracks, so labels are always right. When the remote voice leaks from your speakers into your mic, those duplicate lines are removed.
 - Language: Auto, Turkish, English, or Mixed TR/EN (detects per sentence).
-- Speed: on a laptop CPU Turbo takes about 0.6x the meeting length (Small about 0.2x); on an RTX 3050 laptop GPU about 0.08x (1 hour in ~5 min). You can keep recording while a transcript runs.
+- Speed: on a laptop CPU Turbo takes about 0.6x the meeting length (Small about 0.2x); on an RTX 3050 laptop GPU about 0.05x (1.5 hours in ~4 min; it decodes several pieces at once and needs ~2.3 GB of GPU memory, falling back to one piece at a time if there isn't enough). You can keep recording while a transcript runs.
+- With My server, Online API or a GPU, the transcript is made while you record: every 5 minutes the new audio is cut at a quiet moment and transcribed in the background, so after Stop only the last few minutes are left and the transcript is ready in seconds. Without a GPU this waits until Stop, so the call doesn't slow down.
 
 `CryRec.exe --transcribe <folder>` does the same headless (result in `<folder>\transcript.log`).
 

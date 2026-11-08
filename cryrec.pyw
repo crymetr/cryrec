@@ -10,6 +10,7 @@ import json
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -38,11 +39,12 @@ import callwatch
 from ui_theme import (THEME_MODES, LevelMeter, PillButton, Theme, Tooltip, enable_dpi_awareness,
                       work_area)
 import dictate
+import live as lv
 import summarize as sm
 import transcribe as tr
 
 APP = "CryRec"
-VERSION = "0.10.6"
+VERSION = "0.11.0"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -244,6 +246,8 @@ class Track:
         self._writer = None
         self._wav = None
         self._t0 = None
+        self.tap = None  # LiveTranscript puts a list here and collects every written block
+        self.tap_lock = threading.Lock()
 
     def _callback(self, data, frame_count, time_info, status):
         self.q.put(data)
@@ -267,9 +271,16 @@ class Track:
         self._writer = threading.Thread(target=self._write_loop, daemon=True)
         self._writer.start()
 
+    def _write(self, data):
+        self._wav.writeframes(data)
+        self.frames_written += len(data) // (2 * self.channels)
+        if self.tap is not None:
+            with self.tap_lock:
+                if self.tap is not None:
+                    self.tap.append(data)
+
     def _write_silence(self, frames):
-        self._wav.writeframes(b"\x00\x00" * self.channels * frames)
-        self.frames_written += frames
+        self._write(b"\x00\x00" * self.channels * frames)
 
     def _write_loop(self):
         try:
@@ -288,8 +299,7 @@ class Track:
                     if self.pad_gaps:
                         self.level = 0.0
                     continue
-                self._wav.writeframes(data)
-                self.frames_written += len(data) // (2 * self.channels)
+                self._write(data)
                 samples = np.frombuffer(data, dtype=np.int16)
                 if samples.size:
                     peak = np.abs(samples.astype(np.int32)).max() / 32768.0
@@ -379,8 +389,9 @@ def load_vocabulary():
         return ""
 
 
-def run_transcript(cfg, session_dir, progress, cancel, cache):
-    """Transcribe one recording folder with the engine chosen in cfg. cache keeps a loaded local model."""
+def run_transcript(cfg, session_dir, progress, cancel, cache, lock):
+    """Transcribe one recording folder with the engine chosen in cfg. cache keeps a loaded local model,
+    lock keeps the live transcript and the job queue from using it at the same time."""
     engine, language = cfg.get("engine", "local"), cfg.get("language", "Auto")
     vocab = load_vocabulary()
     if engine == "server":
@@ -394,11 +405,12 @@ def run_transcript(cfg, session_dir, progress, cancel, cache):
     device = "auto" if cfg.get("use_gpu", True) else "cpu"
     if not tr.model_ready(MODELS_DIR, model):
         tr.download_model(MODELS_DIR, model, progress, cancel)
-    if (model, device) not in cache:
-        cache.clear()
-        progress(0.0, "loading speech model...")
-        cache[(model, device)] = tr.LocalEngine(MODELS_DIR, model, device)
-    return tr.transcribe_session(session_dir, cache[(model, device)], language, progress, cancel, vocab)
+    with lock:
+        if (model, device) not in cache:
+            cache.clear()
+            progress(0.0, "loading speech model...")
+            cache[(model, device)] = tr.LocalEngine(MODELS_DIR, model, device)
+        return tr.transcribe_session(session_dir, cache[(model, device)], language, progress, cancel, vocab)
 
 
 def run_clean(cfg, session_dir, progress, cancel):
@@ -1206,6 +1218,8 @@ class App:
         root.minsize(width, 0)
 
         self.t_queue = queue.Queue()
+        self.engines, self.engine_lock = {}, threading.Lock()  # local speech model, shared by jobs and live
+        self.live = {}  # session folder -> LiveTranscript, from Record until its transcript job picks it up
         self.t_cancel = threading.Event()
         self.t_busy = False
         threading.Thread(target=self._transcribe_worker, daemon=True).start()
@@ -1595,7 +1609,6 @@ class App:
     def _transcribe_worker(self):
         """Runs jobs one by one. It never touches self.jobs or widgets directly: every change goes
         through _t_ui, which applies it on the Tk thread."""
-        loaded = {}
         while True:
             session_dir, cfg, mode = self.t_queue.get()
             key = str(session_dir)
@@ -1617,7 +1630,7 @@ class App:
             msg = ""
             try:
                 if mode == "all":
-                    run_transcript(cfg, session_dir, progress, self.t_cancel.is_set, loaded)
+                    self._transcript(cfg, session_dir, progress)
                     msg = "Transcript saved."
                     if cfg.get("clean_engine", "off") != "off":
                         stage("clean")
@@ -1652,11 +1665,54 @@ class App:
                 msg = f"Transcript failed: {e}"
             self.cancel_all = False
             self.running = None
-            if self.t_queue.empty():
-                loaded.clear()  # free ~1 GB of RAM until the next job
+            if self.t_queue.empty() and not self.recording:
+                with self.engine_lock:
+                    self.engines.clear()  # free ~1 GB of RAM until the next job
             name = session_when(session_dir.name) if SESSION_NAME.match(session_dir.name) else session_dir.name
             self._t_ui(busy=not self.t_queue.empty(), text=f"{name}: {msg}",
                        job=(key, {"stage": None, "errors": dict(errors)}))
+
+    def _transcript(self, cfg, session_dir, progress):
+        """Worker thread. Uses the parts transcribed while recording when there are any."""
+        live = self.live.pop(str(session_dir), None)
+        if live:
+            progress(0.0, "Finishing the transcript...")
+            while not live.done.wait(0.5):
+                if self.t_cancel.is_set():
+                    live.cancel()
+                    raise tr.Cancelled()
+        parts = tr.live_parts(session_dir)
+        if not parts:
+            return run_transcript(cfg, session_dir, progress, self.t_cancel.is_set, self.engines, self.engine_lock)
+        for i, p in enumerate(parts):  # parts that failed or were not reached while recording
+            d = session_dir / "live" / p["name"]
+            if not (d / "transcript.srt").exists():
+                run_transcript(cfg, d, lambda f, t, i=i: progress((i + f) / len(parts), t),
+                               self.t_cancel.is_set, self.engines, self.engine_lock)
+        txt = tr.merge_parts(session_dir, parts)
+        shutil.rmtree(session_dir / "live", ignore_errors=True)  # a later re-run uses the full tracks
+        return txt
+
+    def _live_ok(self, cfg):
+        """Transcribe while recording only where it costs the call nothing: a server, an API or a GPU."""
+        engine = cfg.get("engine", "local")
+        if engine == "server":
+            return bool(cfg.get("server_url") and secret_get(cfg, "server_key"))
+        if engine == "api":
+            return bool(secret_get(cfg, "api_key"))
+        if not cfg.get("use_gpu", True) or not tr.model_ready(MODELS_DIR, cfg.get("model", "turbo")):
+            return False
+        try:
+            import ctranslate2
+            return ctranslate2.get_cuda_device_count() > 0
+        except Exception:
+            return False
+
+    def _live_part(self, cfg, part_dir):
+        """LiveTranscript thread: one part, with the settings the recording started with."""
+        run_transcript(cfg, part_dir, lambda f, t: None, lambda: False, self.engines, self.engine_lock)
+        if any(getattr(e, "device", "") == "cpu" for e in self.engines.values()):
+            raise tr.Cancelled()  # CUDA not usable after all: don't load the CPU during the call
 
     def _t_ui(self, busy=None, text=None, job=None, drop=()):
         def apply():
@@ -1771,6 +1827,13 @@ class App:
             messagebox.showerror(APP, f"Could not start recording:\n{e}")
             return
 
+        cfg = self._transcript_settings()
+        if cfg.get("auto_transcribe", True) and self._live_ok(cfg):
+            try:
+                self.live[str(self.session_dir)] = lv.LiveTranscript(
+                    self.session_dir, [(t.path.stem, t) for t in self.tracks], lambda d, c=cfg: self._live_part(c, d))
+            except Exception:
+                pass  # the transcript is made after Stop as before
         self.recording = True
         self.rec_btn.configure_button(text="\u25A0  Stop", kind="stop")
         self.in_box.config(state="disabled")
@@ -1793,6 +1856,8 @@ class App:
 
     def stop(self):
         self._teardown()
+        if str(self.session_dir) in self.live:
+            self.live[str(self.session_dir)].finish()
         self.recording = False
         self.call_app = None
         if self.end_popup and self.end_popup.alive:
@@ -1976,7 +2041,7 @@ def main():
         cfg = load_config()
         out = Path(sys.argv[2]) / "transcript.log"
         try:
-            res = f"OK {run_transcript(cfg, Path(sys.argv[2]), lambda f, t: None, lambda: False, {})}"
+            res = f"OK {run_transcript(cfg, Path(sys.argv[2]), lambda f, t: None, lambda: False, {}, threading.Lock())}"
             if cfg.get("clean_engine", "off") != "off":
                 res += f"\nOK cleaned, {run_clean(cfg, Path(sys.argv[2]), lambda f, t: None, lambda: False)} lines left as heard"
             if cfg.get("notes_engine", "off") != "off":
