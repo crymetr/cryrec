@@ -40,11 +40,12 @@ from ui_theme import (THEME_MODES, LevelMeter, PillButton, Theme, Tooltip, enabl
                       work_area)
 import dictate
 import live as lv
+import meetinginfo as mi
 import summarize as sm
 import transcribe as tr
 
 APP = "CryRec"
-VERSION = "0.14.0"
+VERSION = "0.15.0"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -389,11 +390,18 @@ def load_vocabulary():
         return ""
 
 
+def session_vocabulary(session_dir):
+    """vocabulary.txt plus the attendee names of the meeting this recording belongs to (meeting.json)."""
+    vocab = load_vocabulary()
+    names = (mi.load(session_dir) or {}).get("attendees") or []
+    return vocab + ("\n# attendees of this meeting\n" + "\n".join(names) + "\n" if names else "")
+
+
 def run_transcript(cfg, session_dir, progress, cancel, cache, lock):
     """Transcribe one recording folder with the engine chosen in cfg. cache keeps a loaded local model,
     lock keeps the live transcript and the job queue from using it at the same time."""
     engine, language = cfg.get("engine", "local"), cfg.get("language", "Auto")
-    vocab = load_vocabulary()
+    vocab = session_vocabulary(session_dir)
     if engine == "server":
         return tr.remote_transcribe(session_dir, cfg.get("server_url", ""), secret_get(cfg, "server_key"),
                                     language, progress, cancel, vocab)
@@ -419,7 +427,7 @@ def run_clean(cfg, session_dir, progress, cancel):
     session_dir = Path(session_dir)
     txt = session_dir / "transcript.txt"
     raw = txt.read_text(encoding="utf-8")
-    vocab = load_vocabulary()
+    vocab = session_vocabulary(session_dir)
     if cfg.get("clean_engine") == "server_claude":
         cleaned, kept = sm.remote_clean(cfg.get("server_url", ""), secret_get(cfg, "server_key"), raw,
                                         progress, cancel, vocab)
@@ -439,7 +447,7 @@ def run_notes(cfg, session_dir, progress, cancel):
     engine = cfg.get("notes_engine", "off")
     language = sm.NOTES_LANGUAGES.get(cfg.get("notes_language", "English"), "English")
     my_name = cfg.get("my_name", "")
-    vocab = load_vocabulary()
+    vocab = session_vocabulary(session_dir)
     glossary, _ = tr.parse_vocabulary(vocab)
     if engine in ("server_local", "server_claude"):
         md = sm.remote_notes(cfg.get("server_url", ""), secret_get(cfg, "server_key"), transcript,
@@ -453,7 +461,7 @@ def run_notes(cfg, session_dir, progress, cancel):
             "ollama": lambda: sm.OllamaNotes(cfg.get("ollama_url"), cfg.get("ollama_model")),
         }[engine]()
         md = backend.notes(transcript, my_name, language, progress, cancel, glossary)
-    return sm.write_notes(session_dir, md)
+    return sm.write_notes(session_dir, md, mi.load(session_dir))
 
 
 DICTATION_LOG = CONFIG_DIR / "dictation.txt"
@@ -929,6 +937,9 @@ class SettingsDialog:
         ttk.Spinbox(sil, from_=0, to=60, width=5, textvariable=self.silence).grid(row=0, column=0)
         ttk.Label(sil, text="minutes (0 = off)", style="Muted.TLabel").grid(row=0, column=1, padx=px(8))
         self._hint(c, "calls", "Asks before recording. Stops by itself 30 s after a call ends or goes quiet.")
+        self.meet_names = self._check(c, "calls", "Name recordings after the meeting", cfg.get("meeting_names", True))
+        self._hint(c, "calls", "Title and attendees from classic Outlook's calendar (if Outlook is open),\n"
+                               "else the Teams meeting name. Read on this PC only.")
         self._section(c, "calls", "Dictation")
         self.dict_on = self._check(c, "calls", "Dictation shortcut", cfg.get("dictation_enabled", True))
         self.dict_key = self._combo(c, "calls", "Shortcut", {k: k for k in dictate.HOTKEYS},
@@ -1084,7 +1095,7 @@ class SettingsDialog:
             notes_language=self._key(self.notes_lang),
             my_name=self.my_name.get().strip(), claude_model=self.c_model.get().strip(),
             notes_model=self.n_model.get().strip(), ollama_url=self.o_url.get().strip(),
-            ollama_model=self.o_model.get().strip(), watch_calls=self.watch.get(),
+            ollama_model=self.o_model.get().strip(), watch_calls=self.watch.get(), meeting_names=self.meet_names.get(),
             silence_minutes=_int(self.silence.get(), 5, 0, 60), dictation_enabled=self.dict_on.get(),
             dictation_hotkey=self._key(self.dict_key), dictation_polish=self._key(self.polish),
             polish_model=self.polish_model.get().strip(), auto_update=self.auto_upd.get())
@@ -1099,19 +1110,21 @@ class SettingsDialog:
             self.on_save()
 
 
-SESSION_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$")
+SESSION_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}( .+)?$")  # optional meeting title
 RECENT_COUNT = 5
 
 
 def session_when(name):
-    """'2026-10-16_10-00-00' -> 'Today 10:00' / 'Yesterday 09:00' / '14 Oct 16:00'."""
+    """'2026-10-16_10-00-00' -> 'Today 10:00' / 'Yesterday 09:00' / '14 Oct 16:00'; a meeting title
+    after the time ('2026-10-16_10-00-00 Weekly sync') is added: 'Today 10:00 \u00b7 Weekly sync'."""
     try:
-        dt = datetime.strptime(name, "%Y-%m-%d_%H-%M-%S")
+        dt = datetime.strptime(name[:19], "%Y-%m-%d_%H-%M-%S")
     except ValueError:
         return name
     days = (datetime.now().date() - dt.date()).days
     day = "Today" if days == 0 else "Yesterday" if days == 1 else dt.strftime("%d %b").lstrip("0")
-    return f"{day} {dt:%H:%M}"
+    title = name[19:].strip()
+    return f"{day} {dt:%H:%M}" + (f" \u00b7 {title}" if title else "")
 
 
 class App:
@@ -1803,12 +1816,16 @@ class App:
             return
         out_root = Path(self.cfg.get("out_dir", str(DEFAULT_OUT))).expanduser()
         stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        self.session_dir = out_root / stamp
+        meeting = mi.current_meeting() if self.cfg.get("meeting_names", True) else None
+        title = mi.folder_suffix((meeting or {}).get("title"))
+        self.session_dir = out_root / (f"{stamp} {title}" if title else stamp)
         try:
             self.session_dir.mkdir(parents=True, exist_ok=True)
         except Exception as e:
             messagebox.showerror(APP, f"Cannot create the recordings folder:\n{e}\n\nPick another one in Settings > General.")
             return
+        if meeting:
+            mi.save(self.session_dir, meeting)
 
         self.cfg.update(input=self.in_var.get(), output=self.out_var.get(), out_dir=str(out_root))
         save_config(self.cfg)

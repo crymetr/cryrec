@@ -11,6 +11,8 @@ truststore>=0.10
 av>=11,<16
 pystray>=0.19
 sv-ttk>=2.6
+# meeting title + attendees from classic Outlook (COM)
+pywin32
 # build only
 pyinstaller
 pillow

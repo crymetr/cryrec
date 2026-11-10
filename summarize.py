@@ -319,9 +319,15 @@ def _remote_job(url, key, path, payload, result, progress, cancel):
         time.sleep(2)
 
 
-def write_notes(session_dir, notes_md):
+def write_notes(session_dir, notes_md, meeting=None):
+    """meeting: the recording's meeting.json ({title, attendees}); its title and attendees go on top."""
     from pathlib import Path
     session_dir = Path(session_dir)
     out = session_dir / "notes.md"
-    out.write_text(f"# Meeting notes: {session_dir.name.replace('_', ' ')}\n\n{notes_md.strip()}\n", encoding="utf-8")
+    when = session_dir.name[:19].replace("_", " ")
+    meeting = meeting or {}
+    head = f"# {meeting['title']}\n\n{when}" if meeting.get("title") else f"# Meeting notes: {when}"
+    if meeting.get("attendees"):
+        head += "\n\nAttendees: " + ", ".join(meeting["attendees"])
+    out.write_text(f"{head}\n\n{notes_md.strip()}\n", encoding="utf-8")
     return out

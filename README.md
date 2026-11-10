@@ -48,6 +48,8 @@ CryRec can sit in the tray (closing the window hides it; right-click the tray ic
 
 It reads which app is using the microphone from Windows (`CapabilityAccessManager` in the registry): no admin rights, no meeting-app plugins. Turn it on or off under **Settings → Calls & dictation**.
 
+**Meeting names**: when you press Record, CryRec looks for the meeting that is on now. If classic Outlook is open, it takes the calendar item's title and attendees (through Outlook's own COM interface; Outlook is never started for this, and the new Outlook has no such interface). Otherwise, if Teams is in a call, it takes the meeting name from the Teams window title. The folder is named after the meeting (`2026-11-10_14-00-05 Weekly sync`), `meeting.json` keeps the title and attendees, the attendee names help the transcript and the notes spell them right, and the notes start with the title and attendees. All of it is read on your PC. Turn it off under **Settings → Calls & dictation**.
+
 ## Dictation
 
 Speak instead of typing, in any app:
@@ -202,4 +204,5 @@ powershell -File packaging\build.ps1
 - v0.9: Android app: phone mic recording and a dictation keyboard, both through your server
 - v0.10: Android floating mic: dictate into any app with any keyboard; Android self-updates
 - v0.11-0.13: faster transcripts (batched GPU, made while recording), faster dictation (written while you speak)
-- v0.14: Android record widget and "Send to my PC" share (this)
+- v0.14: Android record widget and "Send to my PC" share
+- v0.15: recordings named after the meeting (Outlook calendar or Teams), attendee names in the transcript and notes (this)
