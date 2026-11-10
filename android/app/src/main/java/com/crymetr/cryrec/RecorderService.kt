@@ -64,7 +64,9 @@ class RecorderService : Service() {
         session = s
         startedAt = SystemClock.elapsedRealtime()
         recording = s.name
+        startedElapsed = startedAt
         s.update("status" to "recording", "started" to System.currentTimeMillis())
+        QuickRecWidget.update(this)
         wakeLock = (getSystemService(POWER_SERVICE) as PowerManager)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "CryRec:record").apply { acquire(6 * 3600_000L) }
     }
@@ -78,6 +80,7 @@ class RecorderService : Service() {
         recorder = null
         session = null
         recording = null
+        QuickRecWidget.update(this)
         wakeLock?.let { if (it.isHeld) it.release() }
         if (!s.audio.exists() || s.audio.length() < 1000) {
             s.update("status" to "failed", "error" to "Nothing was recorded.", "duration" to seconds)
@@ -200,6 +203,8 @@ class RecorderService : Service() {
 
         /** Name of the session being recorded right now, for the UI. */
         @Volatile var recording: String? = null
+        /** SystemClock.elapsedRealtime() when that recording started, for the widget's timer. */
+        @Volatile var startedElapsed = 0L
         /** True while the queue is being worked on in this process. */
         val processing = AtomicBoolean(false)
         val cancelled: MutableSet<String> = java.util.Collections.synchronizedSet(mutableSetOf())

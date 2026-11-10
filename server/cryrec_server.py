@@ -18,6 +18,9 @@ API (all need "Authorization: Bearer <key>"):
                                keep_warm_minutes after use). A long clip that isn't done in 80 s
                                answers 202 {id} instead; poll GET /jobs/<id> for {result, raw, polished}
     POST   /warm              load the model now (sent when the dictation key goes down)
+    POST   /share             zip with share.json {text, note, subject} + files/<name> -> {id}
+                              saved to share_dir/<id>/ (off while share_dir is empty); a "ready" file
+                              is written last, so a watcher on that folder never sees a half-written share
     GET    /jobs/<id>         {status: queued|running|done|failed, progress, text, error,
                                txt+srt (transcript) | md (notes) | txt+kept (clean)}
 A zip may also carry vocab.txt; it is merged with the server's vocabulary_file.
@@ -50,7 +53,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import summarize as sm  # noqa: E402
 import transcribe as tr  # noqa: E402
 
-VERSION = "0.11.0"
+VERSION = "0.12.0"
 APPDATA = Path(os.environ.get("APPDATA", Path.home())) / "CryRec"
 LOCALAPPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "CryRec"
 DEFAULTS = {
@@ -72,11 +75,14 @@ DEFAULTS = {
     "claude_model": sm.DEFAULT_CLAUDE_MODEL,
     # terms and "wrong -> right" fixes used for every job, merged with the client's own list
     "vocabulary_file": str(APPDATA / "vocabulary.txt"),
+    # phone "Share to my PC": folder that receives shared text/files; empty = off
+    "share_dir": "",
 }
 MAX_VOCAB = 64 * 1024
 MAX_DICTATE_BODY = 12 * 1024 * 1024
 MAX_NOTES_BODY = 5 * 1024 * 1024
 MAX_BODY = 300 * 1024 * 1024
+SHARE_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 TRACK_NAME = re.compile(r"^(me|them|meeting)\.(mp3|flac|wav|ogg|opus|m4a)$")
 
 
@@ -428,6 +434,35 @@ class Jobs:
                     del self.jobs[k]
 
 
+def save_share(share_dir, body):
+    """Unpack a phone share into share_dir/<id>/: share.json, files/..., then "ready". Returns the id."""
+    with zipfile.ZipFile(io.BytesIO(body)) as z:
+        meta = json.loads(z.read("share.json").decode("utf-8")) if "share.json" in z.namelist() else {}
+        if not isinstance(meta, dict):
+            raise ValueError("share.json must be an object")
+        sid = time.strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(2)
+        out = Path(share_dir) / sid
+        (out / "files").mkdir(parents=True)
+        names = []
+        for info in z.infolist():
+            if info.is_dir() or not info.filename.startswith("files/"):
+                continue
+            name = SHARE_NAME.sub("_", info.filename.rsplit("/", 1)[-1]).strip(" .") or "file"
+            stem, dot, ext = name.rpartition(".")
+            n = 2
+            while name in names:  # two shared files with the same name
+                name = f"{stem or ext} ({n}){dot}{ext if stem else ''}"
+                n += 1
+            with z.open(info) as src, open(out / "files" / name, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            names.append(name)
+    meta = {k: str(meta.get(k, "")) for k in ("text", "note", "subject")} | {
+        "files": names, "received": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    (out / "share.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    (out / "ready").write_text("", encoding="utf-8")
+    return sid
+
+
 def make_handler(cfg, jobs):
     key = cfg["key"].encode()
 
@@ -463,7 +498,8 @@ def make_handler(cfg, jobs):
             if path == "/health":
                 return self._send(200, {"ok": True, "version": VERSION, "model": cfg["model"], "device": jobs.device, "gpu": gpu_info(),
                                         "notes": {"local": bool(cfg.get("ollama_url")),
-                                                  "claude": bool(cfg.get("anthropic_api_key"))}})
+                                                  "claude": bool(cfg.get("anthropic_api_key"))},
+                                        "share": bool(cfg.get("share_dir"))})
             job = jobs.get(self._job_id() or "")
             if not job:
                 return self._send(404, {"error": "not found"})
@@ -524,6 +560,18 @@ def make_handler(cfg, jobs):
                 except ValueError as e:
                     return self._send(400, {"error": str(e)})
                 return self._send(200, {"id": job_id})
+            if u.path == "/share":
+                if not cfg.get("share_dir"):
+                    return self._send(403, {"error": "Sharing is off on this server (share_dir in server.json)."})
+                n = int(self.headers.get("Content-Length") or 0)
+                if not 0 < n <= MAX_BODY:
+                    return self._send(413, {"error": "body missing or too large"})
+                try:
+                    sid = save_share(cfg["share_dir"], self.rfile.read(n))
+                except (ValueError, KeyError, zipfile.BadZipFile) as e:
+                    return self._send(400, {"error": f"bad share: {e}"})
+                log(f"share {sid} received ({n // 1024} KB)")
+                return self._send(200, {"id": sid})
             if u.path != "/jobs":
                 return self._send(404, {"error": "not found"})
             n = int(self.headers.get("Content-Length") or 0)

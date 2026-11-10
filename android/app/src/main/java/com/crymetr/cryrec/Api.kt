@@ -21,7 +21,7 @@ class Api(private val base: String, private val key: String) {
     constructor(p: Prefs) : this(p.serverUrl, p.serverKey)
 
     private fun call(method: String, path: String, body: ByteArray? = null, type: String? = null,
-                     readTimeoutMs: Int = 30_000): JSONObject {
+                     readTimeoutMs: Int = 30_000, file: File? = null): JSONObject {
         if (base.isEmpty() || key.isEmpty()) throw ApiException("Set the server address and key in Settings.")
         val c = URL(base + path).openConnection() as HttpURLConnection
         try {
@@ -34,6 +34,11 @@ class Api(private val base: String, private val key: String) {
                 c.setRequestProperty("Content-Type", type ?: "application/octet-stream")
                 c.setFixedLengthStreamingMode(body.size)
                 c.outputStream.use { it.write(body) }
+            } else if (file != null) {
+                c.doOutput = true
+                c.setRequestProperty("Content-Type", type ?: "application/octet-stream")
+                c.setFixedLengthStreamingMode(file.length())
+                c.outputStream.use { out -> file.inputStream().use { it.copyTo(out) } }
             }
             val code = c.responseCode
             val text = (if (code < 400) c.inputStream else c.errorStream)?.use { it.readBytes().decodeToString() } ?: ""
@@ -73,6 +78,10 @@ class Api(private val base: String, private val key: String) {
 
     fun clean(transcript: String, vocabulary: String): String =
         json("/clean", JSONObject().put("transcript", transcript).put("vocabulary", vocabulary)).getString("id")
+
+    /** Send a share (zip: share.json + files/...) to the server's share folder. Returns its id. */
+    fun share(zip: File): String =
+        call("POST", "/share", type = "application/zip", readTimeoutMs = 120_000, file = zip).getString("id")
 
     fun job(id: String): JSONObject = call("GET", "/jobs/$id")
 
