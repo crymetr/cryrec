@@ -119,6 +119,10 @@ The API is documented at the top of `server/cryrec_server.py`.
 `CryRec-<ver>-android.apk` from the Releases page (Android 10 or newer). It needs a CryRec server (above); the phone does no speech recognition itself.
 
 - **Record**: records the phone's microphone, also with the screen off. Use it for meetings in a room, or a call on speakerphone. Android does not let apps record the other side of Teams, Zoom, WhatsApp or phone calls, so there is no Me / Them split: the transcript has one "Speaker".
+- **Level meter**: while recording, the record screen shows the real level of what is being saved, in dBFS (0 = the loudest a sample can be; normal speech close by is roughly -30 to -12). The bar is RMS (how loud it sounds), the thin line the peak. It also names the mic Android is really using, and warns when it stays very quiet, when the limiter is working hard, or when the mic itself overloads.
+- **Gain**: 0 to +24 dB, in Settings or with - / + while recording. A soft limiter keeps boosted loud parts from distorting (output stays under -0.2 dBFS).
+- **Microphone**: Settings > Recording. "Phone mic" (default) keeps recording the room even with headphones plugged in; "Headset mic" uses a wired or USB headset; "Automatic" lets Android pick. Some phones ignore the choice for wired headsets; the meter line shows which mic is in use.
+- **Listen**: open a recording and tap Listen to play it back, with a slider to jump around.
 - When you stop, the recording is sent to your server. The transcript, the optional Clean up and the notes come back into the app. Share sends them to any app as text. Without a server set, recordings stay on the phone until you add one.
 - **Dictation keyboard**: Settings > Turn on keyboard, then pick "CryRec dictation" with the keyboard button. Tap the mic, talk, tap again (or hold the mic and let go). The text is typed where the cursor is. ⌫ cancels while it listens. The keyboard button switches back to your normal keyboard.
 - **Floating mic**: a small mic button that appears a little above the keyboard while you type, in any app (web pages in Chrome too), with any keyboard (Gboard, Samsung, ...), and is gone when the keyboard is. Tap it, talk, tap again: the text goes into the field at the cursor. Long press cancels. Drag it anywhere; it remembers the side and the height. On Xiaomi/HyperOS and some other phones, allow Autostart and set battery to "No restrictions" for CryRec, or Android may stop the floating mic in the background. Turn it on in Settings > Floating mic (Android Accessibility). Because the APK does not come from Play, Android may first say "Restricted setting": App info > ⋮ > Allow restricted settings, then turn it on again. It only reads the focused text field (to insert your words); fields that refuse direct typing get a paste instead.
@@ -205,4 +209,5 @@ powershell -File packaging\build.ps1
 - v0.10: Android floating mic: dictate into any app with any keyboard; Android self-updates
 - v0.11-0.13: faster transcripts (batched GPU, made while recording), faster dictation (written while you speak)
 - v0.14: Android record widget and "Send to my PC" share
-- v0.15: recordings named after the meeting (Outlook calendar or Teams), attendee names in the transcript and notes (this)
+- v0.15: recordings named after the meeting (Outlook calendar or Teams), attendee names in the transcript and notes
+- v0.16: Android level meter (dBFS), gain boost with limiter, mic choice, play back recordings (this)

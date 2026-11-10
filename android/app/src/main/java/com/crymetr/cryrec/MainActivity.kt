@@ -22,6 +22,18 @@ class MainActivity : Activity() {
     private lateinit var record: ImageButton
     private lateinit var timer: TextView
     private lateinit var banner: TextView
+    private lateinit var levels: View
+    private lateinit var meter: LevelMeter
+    private lateinit var levelText: TextView
+    private lateinit var gainValue: TextView
+    private var quietSince = 0L
+    private var lastClip = 0
+    private var lastLimit = 0
+    private var clipSeen = 0L
+    private var limitSeen = 0L
+    private val meterTick = object : Runnable {
+        override fun run() { updateMeter(); ui.postDelayed(this, 66) }
+    }
     private var lastListKey = ""
     private val tick = object : Runnable {
         override fun run() { refresh(); ui.postDelayed(this, 1000) }
@@ -36,6 +48,13 @@ class MainActivity : Activity() {
         banner = findViewById(R.id.banner)
         findViewById<View>(R.id.settings).setOnClickListener { startActivity(Intent(this, SettingsActivity::class.java)) }
         record.setOnClickListener { toggleRecording() }
+        levels = findViewById(R.id.levels)
+        levelText = findViewById(R.id.level_text)
+        gainValue = findViewById(R.id.gain_value)
+        meter = LevelMeter(this)
+        findViewById<android.widget.FrameLayout>(R.id.meter_box).addView(meter)
+        findViewById<View>(R.id.gain_down).setOnClickListener { stepGain(-1) }
+        findViewById<View>(R.id.gain_up).setOnClickListener { stepGain(1) }
         recoverInterrupted()
         Updater.schedule(this)
         if (System.currentTimeMillis() - Prefs(this).lastUpdateCheck > 6 * 3600_000L)
@@ -50,6 +69,7 @@ class MainActivity : Activity() {
         visible = true
         lastListKey = ""
         ui.post(tick)
+        ui.post(meterTick)
         // Pick up recordings that were queued while the server was not set or the app was closed.
         if (Prefs(this).configured && Session.all(this).any { it.status == "queued" })
             RecorderService.send(this, RecorderService.ACTION_PROCESS)
@@ -58,6 +78,7 @@ class MainActivity : Activity() {
     override fun onPause() {
         visible = false
         ui.removeCallbacks(tick)
+        ui.removeCallbacks(meterTick)
         super.onPause()
     }
 
@@ -95,6 +116,40 @@ class MainActivity : Activity() {
                     Uri.fromParts("package", packageName, null)))
             }
         }
+    }
+
+    /** Gain steps 0..24 dB; applies to the running recording right away and is kept for the next one. */
+    private fun stepGain(dir: Int) {
+        val p = Prefs(this)
+        val i = (Capture.GAINS.indexOf(p.gainDb).coerceAtLeast(0) + dir).coerceIn(0, Capture.GAINS.size - 1)
+        p.gainDb = Capture.GAINS[i]
+        RecorderService.capture?.gainDb = p.gainDb
+        updateMeter()
+    }
+
+    private fun updateMeter() {
+        val c = RecorderService.capture
+        levels.visibility = if (c == null) View.GONE else View.VISIBLE
+        if (c == null) { quietSince = 0L; return }
+        val now = System.currentTimeMillis()
+        val rms = c.rmsDb
+        val peak = c.peakDb
+        meter.set(rms, peak)
+        gainValue.text = if (c.gainDb == 0) "0 dB" else "+${c.gainDb} dB"
+        if (c.clipWindows != lastClip) { lastClip = c.clipWindows; clipSeen = now }
+        if (c.limitWindows != lastLimit) { lastLimit = c.limitWindows; limitSeen = now }
+        if (rms >= LevelMeter.QUIET) quietSince = 0L else if (quietSince == 0L) quietSince = now
+        fun f(db: Double) = if (db <= -120) "−∞" else "%.0f".format(db).replace("-", "−")
+        val line = "${c.micLabel}  ·  peak ${f(peak)} dBFS  ·  RMS ${f(rms)}"
+        val (warn, color) = when {
+            now - clipSeen < 3000 -> "The mic itself is overloaded. Move the phone back; more gain can't fix this." to R.color.accent
+            now - limitSeen < 3000 -> "Loud parts are being held down. If it happens a lot, lower the gain." to R.color.warn
+            quietSince != 0L && now - quietSince > 8000 && c.gainDb < Capture.GAINS.last() ->
+                "Very quiet for a while. If people are talking, turn the gain up." to R.color.warn
+            else -> null to R.color.muted
+        }
+        levelText.text = if (warn == null) line else "$line\n$warn"
+        levelText.setTextColor(getColor(color))
     }
 
     private fun refresh() {

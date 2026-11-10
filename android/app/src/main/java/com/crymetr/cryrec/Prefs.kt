@@ -40,6 +40,14 @@ class Prefs(context: Context) {
     var bubbleLift: Int
         get() = sp.getInt("bubble_lift_dp", 84)
         set(v) = sp.edit().putInt("bubble_lift_dp", v).apply()
+    /** phone | headset | auto, see Capture.MICS. Default phone: a plugged-in headset must not take over a meeting recording. */
+    var mic: String
+        get() = sp.getString("mic", "phone")!!
+        set(v) = sp.edit().putString("mic", v).apply()
+    /** Recording gain in dB (0 = as the mic gives it). */
+    var gainDb: Int
+        get() = sp.getInt("gain_db", 0)
+        set(v) = sp.edit().putInt("gain_db", v).apply()
     var autoUpdate: Boolean
         get() = sp.getBoolean("auto_update", true)
         set(v) = sp.edit().putBoolean("auto_update", v).apply()

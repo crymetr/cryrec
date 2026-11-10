@@ -21,6 +21,14 @@ class DetailActivity : Activity() {
     private lateinit var tabNotes: Button
     private lateinit var tabTranscript: Button
     private lateinit var actions: LinearLayout
+    private lateinit var player: LinearLayout
+    private lateinit var playButton: Button
+    private lateinit var seek: android.widget.SeekBar
+    private lateinit var playTime: TextView
+    private var mp: android.media.MediaPlayer? = null
+    private val playTick = object : Runnable {
+        override fun run() { showPosition(); if (mp?.isPlaying == true) ui.postDelayed(this, 250) }
+    }
     private var showNotes = true
     private var lastKey = ""
     private val ui = Handler(Looper.getMainLooper())
@@ -43,6 +51,24 @@ class DetailActivity : Activity() {
         })
         status = TextView(this).apply { textSize = 13f; setPadding(0, dp(2), 0, dp(10)) }
         root.addView(status)
+
+        // Listen to the recording: play/pause, position, seek.
+        player = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(0, 0, 0, dp(10)) }
+        playButton = pill("▶  Listen") { togglePlay() }
+        seek = android.widget.SeekBar(this).apply {
+            setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: android.widget.SeekBar, v: Int, fromUser: Boolean) {
+                    if (fromUser) { prepare()?.seekTo(v); showPosition() }
+                }
+                override fun onStartTrackingTouch(sb: android.widget.SeekBar) {}
+                override fun onStopTrackingTouch(sb: android.widget.SeekBar) {}
+            })
+        }
+        playTime = TextView(this).apply { textSize = 13f; setTextColor(getColor(R.color.muted)); fontFeatureSettings = "tnum" }
+        player.addView(playButton)
+        player.addView(seek, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        player.addView(playTime)
+        root.addView(player)
 
         val tabs = LinearLayout(this)
         tabNotes = pill("Notes") { showNotes = true; lastKey = ""; refresh() }
@@ -71,7 +97,40 @@ class DetailActivity : Activity() {
     }
 
     override fun onResume() { super.onResume(); ui.post(tick) }
-    override fun onPause() { ui.removeCallbacks(tick); super.onPause() }
+    override fun onPause() {
+        ui.removeCallbacks(tick)
+        ui.removeCallbacks(playTick)
+        mp?.release(); mp = null
+        playButton.text = "▶  Listen"
+        super.onPause()
+    }
+
+    /** The player for meeting.m4a, created on first use. Null if the file can't be played. */
+    private fun prepare(): android.media.MediaPlayer? {
+        mp?.let { return it }
+        return runCatching {
+            android.media.MediaPlayer().apply {
+                setDataSource(session.audio.path)
+                prepare()
+                setOnCompletionListener { playButton.text = "▶  Listen"; seekTo(0); showPosition() }
+            }
+        }.onFailure { playTime.text = "Can't play this file" }.getOrNull()?.also {
+            mp = it
+            seek.max = it.duration
+        }
+    }
+
+    private fun togglePlay() {
+        val m = prepare() ?: return
+        if (m.isPlaying) { m.pause(); playButton.text = "▶  Listen" }
+        else { m.start(); playButton.text = "❚❚  Pause"; ui.post(playTick) }
+    }
+
+    private fun showPosition() {
+        val m = mp ?: return
+        seek.progress = m.currentPosition
+        playTime.text = formatDuration(m.currentPosition / 1000L) + " / " + formatDuration(m.duration / 1000L)
+    }
 
     private fun refresh() {
         if (!session.dir.exists()) return finish()
@@ -84,6 +143,11 @@ class DetailActivity : Activity() {
         lastKey = key
 
         val dur = if (st.has("duration")) formatDuration(st.optLong("duration")) + "  ·  " else ""
+        player.visibility = if (s != "recording" && session.audio.exists()) View.VISIBLE else View.GONE
+        if (mp == null && player.visibility == View.VISIBLE) playTime.text = ""
+        val mic = if (st.has("mic")) "\n" + st.optString("mic") +
+            (st.optInt("gain_db").let { if (it > 0) ", +$it dB gain" else "" }) +
+            (st.optDouble("clipped", 0.0).let { if (it >= 1) ", mic overloaded for ${it.toInt()} s" else "" }) else ""
         status.text = dur + when (s) {
             "recording" -> "Recording…"
             "queued" -> "Waiting to send"
@@ -91,7 +155,7 @@ class DetailActivity : Activity() {
             "done" -> "Done"
             "failed" -> "Failed: " + st.optString("error")
             else -> if (Prefs(this).configured) "Saved on this phone" else "Saved on this phone. Set your server in Settings to send it."
-        }
+        } + mic
         status.setTextColor(getColor(if (s == "failed") R.color.accent else R.color.muted))
 
         if (notes.isEmpty()) showNotes = false

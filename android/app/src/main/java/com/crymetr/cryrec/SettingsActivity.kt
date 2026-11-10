@@ -21,6 +21,8 @@ class SettingsActivity : Activity() {
     private lateinit var url: EditText
     private lateinit var key: EditText
     private lateinit var language: Spinner
+    private lateinit var mic: Spinner
+    private lateinit var gain: Spinner
     private lateinit var notes: Spinner
     private lateinit var clean: Spinner
     private lateinit var name: EditText
@@ -59,6 +61,15 @@ class SettingsActivity : Activity() {
                 runOnUiThread { result.text = msg }
             }.start()
         })
+
+        header("Recording")
+        mic = spinner("Microphone", Capture.MICS.values.toList(), Capture.MICS.keys.indexOf(p.mic).coerceAtLeast(0))
+        hint("With headphones plugged in, Android normally switches to the headset mic, which only hears you. " +
+            "\"Phone mic\" keeps recording the room. Some phones ignore this choice for wired headsets; " +
+            "the record screen shows which mic is really in use.")
+        gain = spinner("Gain", Capture.GAINS.map { if (it == 0) "0 dB (as the mic gives it)" else "+$it dB" },
+            Capture.GAINS.indexOf(p.gainDb).coerceAtLeast(0))
+        hint("Boosts quiet recordings. A limiter keeps loud parts from distorting. You can change it while recording.")
 
         header("Transcript")
         language = spinner("Language", Prefs.LANGUAGES, Prefs.LANGUAGES.indexOf(p.language).coerceAtLeast(0))
@@ -149,6 +160,8 @@ class SettingsActivity : Activity() {
         p.serverUrl = url.text.toString()
         p.serverKey = key.text.toString()
         p.language = Prefs.LANGUAGES[language.selectedItemPosition]
+        p.mic = Capture.MICS.keys.elementAt(mic.selectedItemPosition)
+        p.gainDb = Capture.GAINS[gain.selectedItemPosition]
         p.cleanEngine = Prefs.CLEAN_ENGINES.keys.elementAt(clean.selectedItemPosition)
         p.notesEngine = Prefs.NOTES_ENGINES.keys.elementAt(notes.selectedItemPosition)
         p.myName = name.text.toString()

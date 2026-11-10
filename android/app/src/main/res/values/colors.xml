@@ -6,6 +6,7 @@
     <color name="line">#E3E3E8</color>
     <color name="accent">#D93636</color>
     <color name="ok">#2E7D32</color>
+    <color name="warn">#C77700</color>
     <color name="key">#FFFFFF</color>
     <color name="kb_bg">#E4E4E9</color>
     <bool name="light_bars">true</bool>

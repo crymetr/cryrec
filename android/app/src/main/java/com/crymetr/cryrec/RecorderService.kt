@@ -8,7 +8,6 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.media.MediaRecorder
 import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
@@ -20,7 +19,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * transcript, optional cleanup, optional notes. Stays in the foreground while it works.
  */
 class RecorderService : Service() {
-    private var recorder: MediaRecorder? = null
+    private var recorder: Capture? = null
     private var session: Session? = null
     private var startedAt = 0L
     private var wakeLock: PowerManager.WakeLock? = null
@@ -44,23 +43,15 @@ class RecorderService : Service() {
     private fun startRecording() {
         if (recorder != null) return
         val s = Session.create(this)
-        val r = MediaRecorder(this)
-        try {
-            r.setAudioSource(MediaRecorder.AudioSource.MIC)
-            r.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-            r.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-            r.setAudioChannels(1)
-            r.setAudioSamplingRate(32_000)
-            r.setAudioEncodingBitRate(48_000)
-            r.setOutputFile(s.audio.path)
-            r.prepare()
-            r.start()
+        val p = Prefs(this)
+        val r = try {
+            Capture(this, s.audio, p.mic, p.gainDb)
         } catch (e: Exception) {
-            r.release()
             s.update("status" to "failed", "error" to "The microphone is busy or blocked (${e.message}).")
             return
         }
         recorder = r
+        capture = r
         session = s
         startedAt = SystemClock.elapsedRealtime()
         recording = s.name
@@ -75,9 +66,9 @@ class RecorderService : Service() {
         val r = recorder ?: return
         val s = session!!
         val seconds = (SystemClock.elapsedRealtime() - startedAt) / 1000
-        try { r.stop() } catch (e: RuntimeException) { /* stop right after start: file has no audio */ }
-        r.release()
+        r.stop()
         recorder = null
+        capture = null
         session = null
         recording = null
         QuickRecWidget.update(this)
@@ -86,7 +77,8 @@ class RecorderService : Service() {
             s.update("status" to "failed", "error" to "Nothing was recorded.", "duration" to seconds)
             return
         }
-        s.update("status" to if (Prefs(this).configured) "queued" else "saved", "duration" to seconds)
+        s.update("status" to if (Prefs(this).configured) "queued" else "saved", "duration" to seconds,
+            "mic" to r.micLabel, "gain_db" to r.gainDb, "clipped" to r.clipWindows / 20.0, "limited" to r.limitWindows / 20.0)
     }
 
     /** Run the queue on the worker thread (one at a time). */
@@ -203,6 +195,8 @@ class RecorderService : Service() {
 
         /** Name of the session being recorded right now, for the UI. */
         @Volatile var recording: String? = null
+        /** The running capture, for the level meter and live gain changes. */
+        @Volatile var capture: Capture? = null
         /** SystemClock.elapsedRealtime() when that recording started, for the widget's timer. */
         @Volatile var startedElapsed = 0L
         /** True while the queue is being worked on in this process. */
