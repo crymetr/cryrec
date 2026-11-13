@@ -215,12 +215,41 @@ def passages(arch, words, limit=10, around=2):
     return out
 
 
-def answer(question, arch, ask, progress=lambda t: None):
-    """(answer text with [n] marks, passages). ask(system, user) -> text."""
+def by_meaning(question, arch, embed, progress, limit=6):
+    """Passages close in meaning to the question (works across languages and wordings). [] when unavailable."""
+    try:
+        qv, model = embed([question], "q")
+        arch.embed_missing(embed, model, progress)  # time-boxed; what is learned so far is searched
+        progress("Searching by meaning...")
+        return [{"path": h["path"], "title": h["title"], "date": when(h["path"]), "t": h["t"], "text": h["text"]}
+                for h in arch.nearest(qv[0], model, limit)]
+    except Exception:
+        return []  # no embedding model: the keyword search still answers
+
+
+def merge(first, second, limit=10):
+    """first, then the passages of second that don't overlap them (same recording within 45 s), renumbered."""
+    out = []
+    for p in list(first) + list(second):
+        if len(out) >= limit:
+            break
+        if any(o["path"] == p["path"] and (p["t"] >= 0 and o["t"] >= 0 and abs(o["t"] - p["t"]) < 45
+                                           or o["text"] == p["text"]) for o in out):
+            continue
+        out.append(dict(p))
+    for n, p in enumerate(out, 1):
+        p["n"] = n
+    return out
+
+
+def answer(question, arch, ask, progress=lambda t: None, embed=None):
+    """(answer text with [n] marks, passages, search words). ask(system, user) -> text;
+    embed(texts, kind) -> (vectors, model) adds meaning search when a local embedding model is there."""
+    sem = by_meaning(question, arch, embed, progress) if embed else []
     progress("Thinking of search words...")
     words = expand(question, ask)
     progress("Searching the recordings...")
-    ps = passages(arch, words)
+    ps = merge(sem[:4], passages(arch, words))
     if not ps:
         return "", [], words
     progress(f"Reading {len(ps)} passages...")

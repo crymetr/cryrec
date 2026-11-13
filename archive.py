@@ -12,10 +12,12 @@ import unicodedata
 from pathlib import Path
 
 LINE = re.compile(r"^\[(\d{2}):(\d{2}):(\d{2})\] ([^:]{1,40}): (.*)$")
-INDEX_VERSION = 2
+INDEX_VERSION = 4
 FILES = ("transcript.txt", "notes.md", "bookmarks.json", "meeting.json", "handwritten.md")
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS folders (path TEXT PRIMARY KEY, sig TEXT, title TEXT, tags TEXT);
+CREATE TABLE IF NOT EXISTS vecs (path TEXT, model TEXT, tsig TEXT, t INTEGER, text TEXT, vec BLOB);
+CREATE INDEX IF NOT EXISTS vecs_path ON vecs (path, model);
 CREATE VIRTUAL TABLE IF NOT EXISTS lines USING fts5(
     norm, text UNINDEXED, who UNINDEXED, path UNINDEXED, t UNINDEXED, kind UNINDEXED,
     tokenize = "unicode61 remove_diacritics 2");
@@ -87,7 +89,7 @@ class Archive:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(str(db_path), check_same_thread=False)
         if self.db.execute("PRAGMA user_version").fetchone()[0] != INDEX_VERSION:  # older layout: rebuild
-            self.db.executescript("DROP TABLE IF EXISTS lines; DROP TABLE IF EXISTS folders;")
+            self.db.executescript("DROP TABLE IF EXISTS lines; DROP TABLE IF EXISTS folders; DROP TABLE IF EXISTS vecs;")
             self.db.execute(f"PRAGMA user_version = {INDEX_VERSION}")
         self.db.executescript(SCHEMA)
         self.lock = threading.Lock()  # one connection shared by search windows and their index threads
@@ -149,6 +151,66 @@ class Archive:
         self.db.execute("INSERT INTO folders (path, sig, title, tags) VALUES (?, ?, ?, ?)",
                         (p, sig, title, " ".join(recall.folder_tags(f))))
 
+    # ---- meaning search: one vector per passage (3 transcript lines), made by a local embedding model ----
+    def embed_missing(self, embed, model, progress=lambda t: None, cancel=lambda: False, budget=45.0):
+        """Embed recordings whose transcript has no vectors for this model yet, newest first, for at most
+        `budget` seconds: a big archive is learned over several questions instead of blocking the first one.
+        A recording that fails is skipped (tried again next time). Returns how many are still waiting."""
+        import time
+        import numpy as np
+        with self.lock:
+            paths = [r[0] for r in self.db.execute("SELECT path FROM folders")]
+            have = {(r[0], r[1]) for r in self.db.execute("SELECT DISTINCT path, tsig FROM vecs WHERE model = ?", (model,))}
+            # vectors of recordings that are gone
+            self.db.execute("DELETE FROM vecs WHERE path NOT IN (SELECT path FROM folders)")
+            self.db.commit()
+        todo = [(p, _tsig(p)) for p in sorted(paths, key=lambda x: Path(x).name, reverse=True)]
+        todo = [(p, sig) for p, sig in todo if (p, sig) not in have]
+        end, left, changed = time.monotonic() + budget, len(todo), False
+        for k, (p, sig) in enumerate(todo):
+            if cancel() or time.monotonic() > end:
+                break
+            progress(f"Learning recording {k + 1} of {len(todo)} (once per recording)...")
+            try:
+                ch = passages_of(p)
+                rows = []
+                if ch:
+                    vecs, _ = embed([c[1] for c in ch], "d")
+                    for (t, text), v in zip(ch, vecs):
+                        v = np.asarray(v, dtype=np.float32)
+                        rows.append((p, model, sig, t, text, (v / (np.linalg.norm(v) + 1e-9)).tobytes()))
+                else:
+                    rows.append((p, model, sig, -1, "", b""))  # nothing to embed: remember that
+            except Exception:
+                continue
+            with self.lock, self.db:
+                self.db.execute("DELETE FROM vecs WHERE path = ? AND model = ?", (p, model))
+                self.db.executemany("INSERT INTO vecs (path, model, tsig, t, text, vec) VALUES (?, ?, ?, ?, ?, ?)", rows)
+                self._vec_gen = getattr(self, "_vec_gen", 0) + 1
+            left -= 1
+        return left
+
+    def nearest(self, qvec, model, limit=6):
+        """Passages closest in meaning to the question vector: [{path, title, t, text, score}]."""
+        import numpy as np
+        q = np.asarray(qvec, dtype=np.float32)
+        gen = getattr(self, "_vec_gen", 0)
+        cache = getattr(self, "_vec_cache", None)
+        if not cache or cache[0] != (model, gen):
+            with self.lock:
+                rows = self.db.execute(
+                    "SELECT v.path, f.title, v.t, v.text, v.vec FROM vecs v JOIN folders f ON f.path = v.path "
+                    "WHERE v.model = ? AND v.t >= 0", (model,)).fetchall()
+            rows = [r for r in rows if len(r[4]) == q.shape[0] * 4]  # only vectors of the question's size
+            mat = np.frombuffer(b"".join(r[4] for r in rows), dtype=np.float32).reshape(len(rows), -1) if rows else None
+            cache = self._vec_cache = ((model, gen), rows, mat)
+        _, rows, mat = cache
+        if mat is None or mat.shape[1] != q.shape[0]:
+            return []
+        score = mat @ (q / (np.linalg.norm(q) + 1e-9))
+        return [{"path": rows[i][0], "title": rows[i][1], "t": rows[i][2], "text": rows[i][3], "score": float(score[i])}
+                for i in np.argsort(-score)[:limit]]
+
     def tags(self, path):
         with self.lock:
             r = self.db.execute("SELECT tags FROM folders WHERE path = ?", (str(path),)).fetchone()
@@ -183,6 +245,22 @@ class Archive:
                 "WHERE lines MATCH ? ORDER BY rank LIMIT ?", (fts, limit)).fetchall()
         return [{"path": r[0], "title": r[1], "t": r[2], "who": r[3], "kind": r[4], "text": r[5],
                  "snippet": snippet(r[5], words)} for r in rows]
+
+
+def _tsig(folder):
+    """Changes when the transcript changes (the only file the vectors are made from)."""
+    try:
+        st = (Path(folder) / "transcript.txt").stat()
+        return f"{st.st_mtime_ns}:{st.st_size}"
+    except OSError:
+        return ""
+
+
+def passages_of(folder, size=3, step=2, limit=900):
+    """[(seconds, text)]: overlapping windows of transcript lines, the unit of meaning search."""
+    lines = transcript_lines(Path(folder) / "transcript.txt")
+    return [(lines[i][0], "\n".join(f"{w}: {t}" for _, w, t in lines[i:i + size])[:limit])
+            for i in range(0, len(lines), step)]
 
 
 def fmt_clock(sec):

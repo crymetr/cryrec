@@ -98,7 +98,7 @@ Set **Your name** in Settings so action items say your name instead of "Me". Not
 
 ## Ask, promises and "last time"
 
-- **Ask** (in ⋯ > Search and ask): type a question in your own words ("why did we rename the portal?") and press Ask. CryRec asks the notes engine for search words (in English and Turkish, so the question's language doesn't have to match the meeting's), finds the best passages in your transcripts and notes, and has the engine answer from those passages only. Every statement carries a number like [3]; click it to open that moment and listen. If the recordings don't say, the answer says so. It uses the notes engine you picked in Settings, so with "My server (local AI)" or Ollama nothing leaves your machines; with a cloud engine, the passages it found are sent there. It is a keyword search underneath: it finds what was said in words close to yours, not ideas phrased completely differently.
+- **Ask** (in ⋯ > Search and ask): type a question in your own words ("why did we rename the portal?") and press Ask. CryRec asks the notes engine for search words (in English and Turkish, so the question's language doesn't have to match the meeting's), finds the best passages in your transcripts and notes, and has the engine answer from those passages only. Every statement carries a number like [3]; click it to open that moment and listen. If the recordings don't say, the answer says so. It uses the notes engine you picked in Settings, so with "My server (local AI)" or Ollama nothing leaves your machines; with a cloud engine, the passages it found are sent there. With a local engine (your server, or Ollama on this PC) it also searches by meaning: a small local embedding model (`embeddinggemma`, `ollama pull embeddinggemma`) turns passages into numbers once per recording ("Learning recording...", about 15 s per meeting hour on a small GPU), so a question in Turkish finds an English meeting and other wordings are found too. With a cloud engine, or without that model, it is a keyword search only.
 - **Open promises** (⋯ menu): the action items of every meeting's notes in one list, by person, yours first. Click the box to tick an item (it is ticked in that meeting's `notes.md`), click the meeting to open it.
 - **Last time**: when you press Record and the meeting is known (Outlook or Teams), CryRec looks for the previous recording with the same title, or mostly the same people, and shows what was left open then: unticked action items and open questions.
 - **Tags**: ticket-like codes (`ABC-12345`), model-like codes (`EB-X49`) and names in capitals said three times or more are picked up per recording and shown in search results.
@@ -155,6 +155,7 @@ The server only listens on localhost. Put HTTPS in front of it (Cloudflare Tunne
 - `vocabulary_file` (default `%APPDATA%\CryRec\vocabulary.txt`) is merged with each client's vocabulary.
 - `/health` also reports the NVIDIA power limit and P-state, handy for an outside watchdog.
 - `share_dir`: a folder for the phone's **Send to my PC** (below). Each share lands in its own subfolder: `share.json` (the shared text or link, its subject and your note), the files under `files\`, and an empty `ready` file written last. What happens next is up to you: a script that watches the folder can open, file or forward each share. Empty (the default) turns sharing off.
+- `embed_model`: the Ollama embedding model for meaning search (`POST /embed`), default `embeddinggemma`. Pull it once on the server: `ollama pull embeddinggemma`.
 - `ocr_model`: the Ollama vision model that reads photographed handwritten notes (`POST /ocr`), default `gemma3:4b`. Runs locally, never in the cloud.
 - `voices_file`: where the server keeps the voices clients named (phone recordings get Speaker 1, 2... when the app asks for it). Empty (the default) = `voices.json` next to `server.json`. Only numbers describing each voice are stored, never audio.
 
@@ -271,5 +272,6 @@ powershell -File packaging\build.ps1
 - v0.21: calls in the browser and Outlook meetings starting now (desktop), calendar meeting reminders (Android)
 - v0.22: handwritten notes: scan or pick photos, read by a local vision model, used in the notes
 - v0.23: ask your recordings (answers with sources), open promises across meetings, "last time" brief, tags
-- v0.24: drafts (follow-up email, escalation summary, handover), weekly digest, catch me up, delete old audio (this)
+- v0.24: drafts (follow-up email, escalation summary, handover), weekly digest, catch me up, delete old audio
+- v0.25: Ask searches by meaning too (local embedding model), across languages (this)
 - next: smarter answers over the archive, handwritten notes, better meeting detection

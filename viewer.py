@@ -470,7 +470,8 @@ class SearchWindow:
 
         def work():  # worker thread: no Tk calls
             try:
-                self.ask_out = recall.answer(q, self.arch, llm, lambda t: setattr(self, "ask_stage", t))
+                self.ask_out = recall.answer(q, self.arch, llm, lambda t: setattr(self, "ask_stage", t),
+                                             embed=self.app.embedder())
             except Exception as e:
                 self.ask_out = e
         threading.Thread(target=work, daemon=True).start()

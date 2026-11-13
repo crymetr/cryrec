@@ -13,6 +13,7 @@ API (all need "Authorization: Bearer <key>"):
     POST   /jobs?language=&name=&speakers=1   body = zip with me.mp3 / them.mp3 (or meeting.mp3 / .m4a) -> {id}
                                speakers=1: the other side / single track is split into Speaker 1..N
     POST   /voices            JSON {name, vec, seconds}: a client named a speaker (suggested next time)
+    POST   /embed             JSON {texts: [...], kind: q|d} -> {vectors, model} (local Ollama embedding model)
     POST   /ask               JSON {system, user, backend: local|claude} -> {id}; job result {txt}
     POST   /ocr               JSON {image_b64 (JPEG/PNG), vocabulary} -> {id}; job result {txt} (local vision model)
     POST   /notes             JSON {transcript, backend: local|claude, language, my_name, vocabulary} -> {id}
@@ -58,7 +59,7 @@ import diarize as dz  # noqa: E402
 import summarize as sm  # noqa: E402
 import transcribe as tr  # noqa: E402
 
-VERSION = "0.15.0"
+VERSION = "0.16.0"
 APPDATA = Path(os.environ.get("APPDATA", Path.home())) / "CryRec"
 LOCALAPPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "CryRec"
 DEFAULTS = {
@@ -86,6 +87,8 @@ DEFAULTS = {
     "voices_file": "",
     # photos of handwritten notes are read by this Ollama vision model (local only)
     "ocr_model": "gemma3:4b",
+    # meaning search over the client's own transcripts: a local Ollama embedding model
+    "embed_model": sm.DEFAULT_EMBED_MODEL,
 }
 MAX_VOCAB = 64 * 1024
 JPEG_MAGIC = bytes([0xFF, 0xD8, 0xFF])
@@ -303,6 +306,10 @@ class Jobs:
         self._put(job_id, 1)
         log(f"ocr {job_id[:8]} queued ({len(image) // 1024} KB)")
         return job_id
+
+    def running(self):
+        with self.lock:
+            return any(j.get("status") == "running" for j in self.jobs.values())
 
     def get(self, job_id):
         with self.lock:
@@ -639,6 +646,25 @@ def make_handler(cfg, jobs):
                     return self._send(400, {"error": f"bad share: {e}"})
                 log(f"share {sid} received ({n // 1024} KB)")
                 return self._send(200, {"id": sid})
+            if u.path == "/embed":  # vectors for meaning search (local model, answered at once)
+                n = int(self.headers.get("Content-Length") or 0)
+                if not 0 < n <= MAX_NOTES_BODY:
+                    return self._send(413, {"error": "body missing or too large"})
+                try:
+                    p = json.loads(self.rfile.read(n))
+                    texts = [str(t)[:4000] for t in p["texts"]][:64]
+                    if not texts:
+                        raise ValueError("no texts")
+                    if p.get("kind") != "q" and (jobs.running() or time.time() - jobs.last_dictate < 60):
+                        # bulk passages wait while speech work has the GPU; the client learns them later
+                        return self._send(503, {"error": "busy with speech, try later"})
+                    vecs, model = sm.embed_texts(texts, "q" if p.get("kind") == "q" else "d",
+                                                 cfg["ollama_url"], cfg["embed_model"], timeout=120)
+                except (ValueError, KeyError, TypeError) as e:
+                    return self._send(400, {"error": f"bad request: {e}"})
+                except RuntimeError as e:
+                    return self._send(503, {"error": str(e)})
+                return self._send(200, {"vectors": vecs, "model": model})
             if u.path == "/ask":  # a question over passages the client found in its own recordings
                 n = int(self.headers.get("Content-Length") or 0)
                 if not 0 < n <= MAX_NOTES_BODY:

@@ -49,7 +49,7 @@ import transcribe as tr
 import viewer
 
 APP = "CryRec"
-VERSION = "0.24.0"
+VERSION = "0.25.0"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -498,6 +498,18 @@ def llm_for(cfg):
     if engine == "ollama":
         o = sm.OllamaNotes(cfg.get("ollama_url"), cfg.get("ollama_model"))
         return lambda s, u: o._ask(s, u, never)
+    return None
+
+
+def embed_for(cfg):
+    """embed(texts, kind) -> (vectors, model) for meaning search, only with a local engine: your server's
+    Ollama, or Ollama on this PC. None with cloud engines (passages are not sent out just to be indexed)."""
+    engine = cfg.get("notes_engine", "off")
+    if engine in ("server_local", "server_claude") and cfg.get("server_url"):
+        return lambda texts, kind: sm.remote_embed(cfg["server_url"], secret_get(cfg, "server_key"), texts, kind)
+    if engine == "ollama":
+        return lambda texts, kind: sm.embed_texts(texts, kind, cfg.get("ollama_url") or sm.DEFAULT_OLLAMA_URL,
+                                                  cfg.get("embed_model") or sm.DEFAULT_EMBED_MODEL)
     return None
 
 
@@ -1724,6 +1736,9 @@ class App:
                                                            f"({n} files, older than {days} days)."))
         if files:
             threading.Thread(target=work, daemon=True).start()
+
+    def embedder(self):
+        return embed_for(self._transcript_settings())
 
     def open_promises(self):
         viewer.PromisesWindow(self, self.all_folders)

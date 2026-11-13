@@ -379,3 +379,43 @@ def remote_ask(url, key, system, user, backend, cancel=lambda: False):
     """One prompt through a CryRec server's local model ("local") or its cloud key ("claude")."""
     return _remote_job(url, key, "/ask", {"system": system, "user": user, "backend": backend}, "txt",
                        lambda f, t: None, cancel)
+
+
+DEFAULT_EMBED_MODEL = "embeddinggemma"
+
+
+def embed_texts(texts, kind, url=DEFAULT_OLLAMA_URL, model=DEFAULT_EMBED_MODEL, timeout=600):
+    """(vectors, model) from a local Ollama embedding model. kind: "q" for a question, "d" for passages."""
+    pre = ""
+    if "embeddinggemma" in model:  # this model wants to be told which side it is embedding
+        pre = "task: search result | query: " if kind == "q" else "title: none | text: "
+    out = []
+    for i in range(0, len(texts), 32):
+        body = json.dumps({"model": model, "input": [pre + t for t in texts[i:i + 32]], "keep_alive": "2m"}).encode()
+        req = urllib.request.Request(f"{(url or DEFAULT_OLLAMA_URL).rstrip('/')}/api/embed", data=body, method="POST",
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                out += json.load(r)["embeddings"]
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                raise RuntimeError(f"Ollama has no embedding model '{model}' (ollama pull {model})") from None
+            raise RuntimeError(f"Ollama embedding error {e.code}") from None
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"Could not reach Ollama at {url}: {e.reason}") from None
+        except OSError as e:  # read timeout
+            raise RuntimeError(f"Ollama did not answer in time: {e}") from None
+    return out, model
+
+
+def remote_embed(url, key, texts, kind):
+    """(vectors, model) from a CryRec server's local embedding model."""
+    from transcribe import _server_call
+    out, model = [], ""
+    for i in range(0, len(texts), 32):
+        r = _server_call(f"{url.rstrip('/')}/embed", key,
+                         data=json.dumps({"texts": texts[i:i + 32], "kind": kind}).encode("utf-8"),
+                         content_type="application/json")
+        out += r["vectors"]
+        model = r["model"]
+    return out, "server:" + model
