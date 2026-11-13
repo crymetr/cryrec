@@ -46,6 +46,9 @@ WEB_CALLS = [(re.compile(r"^Meet\b|Google Meet", re.I), "Google Meet"),
              (re.compile(r"\bJitsi\b|\bWhereby\b|Discord", re.I), "Web call")]
 
 
+_web_app = None  # the web call seen while the browser has been holding the mic
+
+
 def web_call(titles):
     """Meeting app name if one of these browser window titles is a meeting page, else None."""
     for t in titles:
@@ -87,11 +90,16 @@ def active_calls():
                                 found.add(app)
         except OSError:
             pass
+    global _web_app
     if browser_mic:
         import meetinginfo  # lazy: meetinginfo imports this module
-        app = web_call(meetinginfo._window_titles(BROWSERS))
-        if app:
-            found.add(app)
+        # window titles show only the active tab: once a meeting page was seen, the call lasts for as long as
+        # the browser holds the mic (switching tabs to present a document must not look like the call ended)
+        _web_app = web_call(meetinginfo._window_titles(BROWSERS)) or _web_app
+        if _web_app:
+            found.add(_web_app)
+    else:
+        _web_app = None
     return found
 
 

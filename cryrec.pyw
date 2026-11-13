@@ -48,7 +48,7 @@ import transcribe as tr
 import viewer
 
 APP = "CryRec"
-VERSION = "0.22.1"
+VERSION = "0.22.2"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -479,6 +479,22 @@ def run_speakers(session_dir, progress, cancel):
         raise tr.Cancelled()
 
 
+def _photo_for_ocr(path, max_side=2400, max_bytes=3_000_000):
+    """(bytes, extension). Big photos are scaled down to a JPEG: enough for reading, and under the server's
+    request limit. Small JPEG/PNG files go as they are."""
+    data = path.read_bytes()
+    ext = path.suffix.lower() if path.suffix.lower() in (".jpg", ".jpeg", ".png") else ".jpg"
+    if len(data) <= max_bytes and path.suffix.lower() in (".jpg", ".jpeg", ".png"):
+        return data, ext
+    import io
+    from PIL import Image, ImageOps
+    img = ImageOps.exif_transpose(Image.open(io.BytesIO(data))).convert("RGB")
+    img.thumbnail((max_side, max_side))
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=85)
+    return buf.getvalue(), ".jpg"
+
+
 def run_handwriting(cfg, session_dir, images, progress, cancel):
     """Read photographed pages (local vision model on your server, else Ollama on this PC) into handwritten.md.
     The photos are copied into the folder's scans/. Returns the text added."""
@@ -494,9 +510,9 @@ def run_handwriting(cfg, session_dir, images, progress, cancel):
     for i, img in enumerate(images):
         if cancel():
             raise sm.Cancelled()
-        data = Path(img).read_bytes()
+        data, ext = _photo_for_ocr(Path(img))
         n = start + i + 1
-        (d / "scans" / f"page_{n:02d}{Path(img).suffix.lower() or '.jpg'}").write_bytes(data)
+        (d / "scans" / f"page_{n:02d}{ext}").write_bytes(data)
         progress(i / len(images), f"reading page {i + 1} of {len(images)}...")
         text = (sm.remote_ocr(cfg["server_url"], secret_get(cfg, "server_key"), data, lambda f, t: None, cancel,
                               session_vocabulary(d)) if server else
@@ -1683,6 +1699,10 @@ class App:
         if key in asked or self.recording or (self.start_popup and self.start_popup.alive):
             return
         asked.add(key)
+        # a call is on or was just offered: that question already covered this meeting
+        if self.calls.current or time.monotonic() - getattr(self, "_call_asked_at", -1e9) < 600:
+            return
+        self.start_popup_call = False
         self.start_popup = Popup(self.root, APP, f"\"{m.get('title') or 'A meeting'}\" starts now (Outlook). "
                                  "Record it?\nTell the others that you are recording.",
                                  [("Record", self.start), ("Ignore", lambda: None)], countdown=120,
@@ -1698,13 +1718,15 @@ class App:
         def record():
             self.call_app = app
             self.start()
+        self._call_asked_at = time.monotonic()
+        self.start_popup_call = True
         self.start_popup = Popup(self.root, APP, f"{app} call started. Record it?\n"
                                  "Tell the others that you are recording.",
                                  [("Record", record), ("Ignore", lambda: None)], countdown=120,
                                  countdown_text="This closes in {s} s")
 
     def on_call_end(self, app):
-        if self.start_popup and self.start_popup.alive:
+        if self.start_popup and self.start_popup.alive and getattr(self, "start_popup_call", True):
             self.start_popup.close()
         if self.recording and self.call_app in (None, app):
             self._ask_stop(f"{app} call ended. Stop and save the recording?")

@@ -133,9 +133,9 @@ class RecorderService : Service() {
                     val old = s.readOr(s.handwritten).ifEmpty { "# Handwritten notes\n" }
                     s.handwritten.writeText(old.trimEnd() + "\n\n### Page ${s.pageNo(page)}\n\n" + j.optString("txt").trim() + "\n")
                 }
-                s.notes.delete()
             }
-            if (p.notesEngine != "off" && !s.notes.exists() && s.transcript.exists()) {
+            // new pages: write the notes again (the old ones stay until the new ones arrive)
+            if (p.notesEngine != "off" && (!s.notes.exists() || unread.isNotEmpty()) && s.transcript.exists()) {
                 step("writing notes")
                 val backend = if (p.notesEngine == "server_local") "local" else "claude"
                 val hw = s.readOr(s.handwritten).trim()

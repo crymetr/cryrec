@@ -25,8 +25,9 @@ object CalendarPrompt {
     private const val NOTIFY_ID = 43
     private const val LOOK_AHEAD = 24 * 3600_000L
     private const val EARLY = 4 * 60_000L      // the alarm window opens this long before the start
-    private const val WINDOW = 10 * 60_000L    // Android's minimum for an inexact window
-    private const val LATE = 7 * 60_000L       // still "starting" until 7 minutes after
+    private const val SLACK = 60_000L
+    private const val RECHECK = 6 * 3600_000L  // re-read the calendar at least this often
+    private const val LATE = 10 * 60_000L      // still "starting" until 10 minutes after (alarms can be late)
 
     data class Event(val id: Long, val title: String, val begin: Long, val end: Long)
 
@@ -60,25 +61,37 @@ object CalendarPrompt {
         am.cancel(pi)
         if (!allowed(c)) return
         val now = System.currentTimeMillis()
-        val asked = c.getSharedPreferences("cryrec", Context.MODE_PRIVATE).getString("calendar_asked", "")
+        val asked = asked(c)
+        // only events past the current "starting" window: fire() deals with everything inside it in one go
         val next = runCatching { events(c, now - LATE, now + LOOK_AHEAD) }.getOrDefault(emptyList())
-            .firstOrNull { it.begin > now - LATE && "${it.id}@${it.begin}" != asked } ?: return
-        am.setWindow(AlarmManager.RTC_WAKEUP, maxOf(now + 5_000, next.begin - EARLY), WINDOW, pi)
+            .firstOrNull { it.begin > now - LATE && key(it) !in asked }
+        // a meeting already starting: fire in a moment (fire() marks everything in its window, so no loop).
+        // Also look again every few hours: a meeting added later, or nothing in the next day.
+        val at = minOf(next?.let { maxOf(now + 5_000, it.begin - EARLY) } ?: Long.MAX_VALUE, now + RECHECK)
+        // inexact, but allowed while the phone dozes on the desk
+        am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
     }
+
+    private fun key(e: Event) = "${e.id}@${e.begin}"
+
+    private fun asked(c: Context): List<String> =
+        c.getSharedPreferences("cryrec", Context.MODE_PRIVATE).getString("calendar_asked", "")!!
+            .split("|").filter { it.isNotEmpty() }
 
     /** Called by the alarm: prompt for a meeting starting about now, then set the next alarm. */
     fun fire(c: Context) {
         try {
             if (!allowed(c)) return
             val now = System.currentTimeMillis()
-            val ev = events(c, now - LATE, now + EARLY + 60_000)
-                .firstOrNull { it.begin in (now - LATE)..(now + EARLY + 60_000) } ?: return
-            val asked = c.getSharedPreferences("cryrec", Context.MODE_PRIVATE)
-            val key = "${ev.id}@${ev.begin}"
-            if (asked.getString("calendar_asked", "") == key) return
-            // mark it handled even while recording, or schedule() would re-arm for the same event right away
-            asked.edit().putString("calendar_asked", key).commit()
-            if (RecorderService.recording == null) prompt(c, ev)
+            val asked = asked(c)
+            // every meeting starting about now (two calendars often hold the same one): one prompt for all
+            val evs = events(c, now - LATE, now + EARLY + SLACK)
+                .filter { it.begin in (now - LATE)..(now + EARLY + SLACK) && key(it) !in asked }
+            if (evs.isEmpty()) return
+            // marked handled even while recording, so schedule() moves on to later meetings
+            c.getSharedPreferences("cryrec", Context.MODE_PRIVATE).edit()
+                .putString("calendar_asked", (asked + evs.map { key(it) }).takeLast(30).joinToString("|")).commit()
+            if (RecorderService.recording == null) prompt(c, evs.first())
         } finally {
             schedule(c)
         }
