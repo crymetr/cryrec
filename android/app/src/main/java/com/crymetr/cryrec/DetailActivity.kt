@@ -20,7 +20,22 @@ class DetailActivity : Activity() {
     private lateinit var body: TextView
     private lateinit var tabNotes: Button
     private lateinit var tabTranscript: Button
-    private lateinit var actions: LinearLayout
+    private lateinit var actions: ActionRows
+
+    /** The buttons under the text, three to a row, so none is pushed off the screen. */
+    private inner class ActionRows(val box: LinearLayout) {
+        private var row: LinearLayout? = null
+        fun removeAllViews() { box.removeAllViews(); row = null }
+        fun addView(v: View) {
+            val r = row?.takeIf { it.childCount < 3 } ?: LinearLayout(this@DetailActivity).apply {
+                gravity = Gravity.END
+                setPadding(0, 0, 0, dp(8))
+                box.addView(this)
+                row = this
+            }
+            r.addView(v)
+        }
+    }
     private lateinit var player: LinearLayout
     private lateinit var playButton: Button
     private lateinit var seek: android.widget.SeekBar
@@ -91,8 +106,8 @@ class DetailActivity : Activity() {
             clipToPadding = false
         }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
-        actions = LinearLayout(this).apply { gravity = Gravity.END; setPadding(0, 0, 0, dp(12)) }
-        root.addView(actions)
+        actions = ActionRows(LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, 0, 0, dp(4)) })
+        root.addView(actions.box)
         // fitsSystemWindows replaces padding, so it goes on a wrapper.
         setContentView(android.widget.FrameLayout(this).apply { fitsSystemWindows = true; addView(root) })
     }
@@ -232,6 +247,8 @@ class DetailActivity : Activity() {
 
     /** Photograph paper notes with Google's document scanner (crop, straighten, clean up); the server reads them. */
     private fun scan() {
+        // the first time, Google Play services downloads the scanner; say so instead of looking dead
+        android.widget.Toast.makeText(this, "Opening the scanner…", android.widget.Toast.LENGTH_SHORT).show()
         val options = com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions.Builder()
             .setScannerMode(com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions.SCANNER_MODE_FULL)
             .setResultFormats(com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions.RESULT_FORMAT_JPEG)
@@ -239,7 +256,11 @@ class DetailActivity : Activity() {
             .setPageLimit(20)
             .build()
         com.google.mlkit.vision.documentscanner.GmsDocumentScanning.getClient(options).getStartScanIntent(this)
-            .addOnSuccessListener { sender -> startIntentSenderForResult(sender, REQ_SCAN, null, 0, 0, 0) }
+            .addOnSuccessListener { sender ->
+                runCatching { startIntentSenderForResult(sender, REQ_SCAN, null, 0, 0, 0) }.onFailure {
+                    android.widget.Toast.makeText(this, "Can't open the scanner: ${it.message}", android.widget.Toast.LENGTH_LONG).show()
+                }
+            }
             .addOnFailureListener {
                 android.widget.Toast.makeText(this, "The scanner needs Google Play services: ${it.message}",
                     android.widget.Toast.LENGTH_LONG).show()

@@ -41,7 +41,7 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             if (ksValue("storeFile", "CRYREC_KEYSTORE_FILE") != null) signingConfig = signingConfigs.getByName("release")
         }
     }
