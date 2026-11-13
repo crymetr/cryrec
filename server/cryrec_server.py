@@ -13,6 +13,7 @@ API (all need "Authorization: Bearer <key>"):
     POST   /jobs?language=&name=&speakers=1   body = zip with me.mp3 / them.mp3 (or meeting.mp3 / .m4a) -> {id}
                                speakers=1: the other side / single track is split into Speaker 1..N
     POST   /voices            JSON {name, vec, seconds}: a client named a speaker (suggested next time)
+    POST   /ocr               JSON {image_b64 (JPEG/PNG), vocabulary} -> {id}; job result {txt} (local vision model)
     POST   /notes             JSON {transcript, backend: local|claude, language, my_name, vocabulary} -> {id}
     POST   /clean             JSON {transcript, vocabulary} -> {id}   (Claude fixes casing/punctuation/terms)
     POST   /dictate           JSON {audio_b64, ext, language, polish, model, vocabulary} -> {text, raw}
@@ -56,7 +57,7 @@ import diarize as dz  # noqa: E402
 import summarize as sm  # noqa: E402
 import transcribe as tr  # noqa: E402
 
-VERSION = "0.13.0"
+VERSION = "0.14.0"
 APPDATA = Path(os.environ.get("APPDATA", Path.home())) / "CryRec"
 LOCALAPPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "CryRec"
 DEFAULTS = {
@@ -82,8 +83,12 @@ DEFAULTS = {
     "share_dir": "",
     # speakers told apart on request (phone recordings): names learned from clients; empty = next to server.json
     "voices_file": "",
+    # photos of handwritten notes are read by this Ollama vision model (local only)
+    "ocr_model": "gemma3:4b",
 }
 MAX_VOCAB = 64 * 1024
+JPEG_MAGIC = bytes([0xFF, 0xD8, 0xFF])
+PNG_MAGIC = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
 MAX_DICTATE_BODY = 12 * 1024 * 1024
 MAX_NOTES_BODY = 5 * 1024 * 1024
 MAX_BODY = 300 * 1024 * 1024
@@ -270,6 +275,18 @@ class Jobs:
         log(f"{kind} {job_id[:8]} queued ({backend}, {len(transcript) / 1000:.0f}k chars)")
         return job_id
 
+    def add_ocr(self, image, vocabulary=""):
+        """kind "ocr": a photographed page of handwritten notes -> text, with the local Ollama vision model."""
+        job_id = uuid.uuid4().hex
+        job = {"id": job_id, "kind": "ocr", "image": image, "backend": "local", "vocab": (vocabulary or "")[:MAX_VOCAB],
+               "status": "queued", "progress": 0.0, "text": "waiting", "created": time.time(),
+               "cancel": threading.Event()}
+        with self.lock:
+            self.jobs[job_id] = job
+        self._put(job_id, 1)
+        log(f"ocr {job_id[:8]} queued ({len(image) // 1024} KB)")
+        return job_id
+
     def get(self, job_id):
         with self.lock:
             return self.jobs.get(job_id)
@@ -277,6 +294,9 @@ class Jobs:
     def _run_text_job(self, job):
         glossary, _ = tr.parse_vocabulary(self.vocabulary(job.get("vocab")))
         prog = lambda f, t: job.update(progress=f, text=t)  # noqa: E731
+        if job["kind"] == "ocr":
+            job["txt"] = sm.read_handwriting(job.pop("image"), self.cfg["ollama_url"], self.cfg["ocr_model"], glossary)
+            return
         claude = sm.ClaudeNotes(self.cfg["anthropic_api_key"], self.cfg["claude_model"])
         if job["kind"] == "clean":
             job["txt"], job["kept"] = sm.clean_transcript(
@@ -381,7 +401,7 @@ class Jobs:
             if not job or job["cancel"].is_set():
                 continue
             t0 = time.time()
-            if job.get("kind") in ("notes", "clean"):
+            if job.get("kind") in ("notes", "clean", "ocr"):
                 job["status"], job["text"] = "running", "working on the transcript"
                 if job["backend"] == "local" and engine is not None:
                     engine.park()  # free Whisper's GPU memory for the local LLM (weights stay in RAM)
@@ -527,6 +547,8 @@ def make_handler(cfg, jobs):
                     out["md"] = job["md"]
                 elif job.get("kind") == "clean":
                     out.update(txt=job["txt"], kept=job["kept"])
+                elif job.get("kind") == "ocr":
+                    out["txt"] = job["txt"]
                 elif job.get("kind") == "dictate":
                     out.update(result=job["result"], raw=job["raw"], polished=job["polish"])
                 else:
@@ -592,6 +614,18 @@ def make_handler(cfg, jobs):
                     return self._send(400, {"error": f"bad share: {e}"})
                 log(f"share {sid} received ({n // 1024} KB)")
                 return self._send(200, {"id": sid})
+            if u.path == "/ocr":  # a photo of handwritten notes -> text (local vision model)
+                n = int(self.headers.get("Content-Length") or 0)
+                if not 0 < n <= MAX_DICTATE_BODY:
+                    return self._send(413, {"error": "body missing or too large"})
+                try:
+                    p = json.loads(self.rfile.read(n))
+                    image = base64.b64decode(p["image_b64"])
+                    if not image.startswith((JPEG_MAGIC, PNG_MAGIC)):
+                        raise ValueError("JPEG or PNG only")
+                except (ValueError, KeyError, TypeError) as e:
+                    return self._send(400, {"error": f"bad request: {e}"})
+                return self._send(200, {"id": jobs.add_ocr(image, str(p.get("vocabulary", "")))})
             if u.path == "/voices":  # a client named a speaker: remember the voice for suggestions
                 n = int(self.headers.get("Content-Length") or 0)
                 if not 0 < n <= 64 * 1024:

@@ -86,6 +86,11 @@ class Api(private val base: String, private val key: String) {
 
     fun job(id: String): JSONObject = call("GET", "/jobs/$id")
 
+    /** A photographed page of handwritten notes -> job id; the result's "txt" is the text (server's local model). */
+    fun ocr(image: ByteArray, vocabulary: String): String =
+        json("/ocr", JSONObject().put("image_b64", android.util.Base64.encodeToString(image, android.util.Base64.NO_WRAP))
+            .put("vocabulary", vocabulary), 60_000).getString("id")
+
     /** A speaker was named: the server remembers the voice and suggests the name next time. */
     fun voice(name: String, vec: org.json.JSONArray, seconds: Double) {
         json("/voices", JSONObject().put("name", name).put("vec", vec).put("seconds", seconds))

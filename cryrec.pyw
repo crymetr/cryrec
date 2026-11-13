@@ -48,7 +48,7 @@ import transcribe as tr
 import viewer
 
 APP = "CryRec"
-VERSION = "0.21.0"
+VERSION = "0.22.0"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -449,7 +449,8 @@ def run_clean(cfg, session_dir, progress, cancel):
 
 def run_notes(cfg, session_dir, progress, cancel):
     """Write notes.md from transcript.txt with the notes engine chosen in cfg."""
-    transcript = with_bookmarks(session_dir, (Path(session_dir) / "transcript.txt").read_text(encoding="utf-8"))
+    transcript = sm.with_handwriting(session_dir, with_bookmarks(
+        session_dir, (Path(session_dir) / "transcript.txt").read_text(encoding="utf-8")))
     engine = cfg.get("notes_engine", "off")
     language = sm.NOTES_LANGUAGES.get(cfg.get("notes_language", "English"), "English")
     my_name = cfg.get("my_name", "")
@@ -476,6 +477,35 @@ def run_speakers(session_dir, progress, cancel):
         return dz.run_session(session_dir, MODELS_DIR, VOICES_FILE, tr, progress, cancel)
     except dz.Cancelled:
         raise tr.Cancelled()
+
+
+def run_handwriting(cfg, session_dir, images, progress, cancel):
+    """Read photographed pages (local vision model on your server, else Ollama on this PC) into handwritten.md.
+    The photos are copied into the folder's scans/. Returns the text added."""
+    d = Path(session_dir)
+    (d / "scans").mkdir(exist_ok=True)
+    glossary, _ = tr.parse_vocabulary(session_vocabulary(d))
+    server = cfg.get("server_url") and secret_get(cfg, "server_key")
+    # next number after the highest page there (a deleted page must not make a new one overwrite another)
+    nums = [int(m.group(1)) for p in (d / "scans").glob("page_*") if (m := re.match(r"page_(\d+)", p.name))]
+    start = max(nums, default=0)
+    hw = d / "handwritten.md"
+    added = []
+    for i, img in enumerate(images):
+        if cancel():
+            raise sm.Cancelled()
+        data = Path(img).read_bytes()
+        n = start + i + 1
+        (d / "scans" / f"page_{n:02d}{Path(img).suffix.lower() or '.jpg'}").write_bytes(data)
+        progress(i / len(images), f"reading page {i + 1} of {len(images)}...")
+        text = (sm.remote_ocr(cfg["server_url"], secret_get(cfg, "server_key"), data, lambda f, t: None, cancel,
+                              session_vocabulary(d)) if server else
+                sm.read_handwriting(data, cfg.get("ollama_url"), cfg.get("ocr_model") or "gemma3:4b", glossary))
+        part = f"### Page {n}\n\n{text.strip()}\n"
+        old = hw.read_text(encoding="utf-8") if hw.exists() else "# Handwritten notes\n"
+        hw.write_text(old.rstrip() + "\n\n" + part, encoding="utf-8")  # page by page: a cancel keeps what was read
+        added.append(part)
+    return "\n".join(added)
 
 
 def with_bookmarks(session_dir, transcript):
@@ -1382,7 +1412,8 @@ class App:
             return "Saving audio...", "busy", None
         if job and job.get("stage"):
             pct = f" {job['progress'] * 100:.0f}%" if job.get("progress") else ""
-            return {"transcript": "Transcribing", "speakers": "Telling speakers apart", "clean": "Cleaning up",
+            return {"transcript": "Transcribing", "speakers": "Telling speakers apart", "scan": "Reading handwriting",
+                    "clean": "Cleaning up",
                     "notes": "Writing notes",
                     "queued": "Waiting"}.get(job["stage"], job["stage"]) + pct, "busy", None
         has_t, has_n = (d / "transcript.txt").exists(), (d / "notes.md").exists()
@@ -1455,6 +1486,7 @@ class App:
                                            command=lambda k=key: self.enqueue_notes(d, engine=k))
             m.add_cascade(label="Write notes with", menu=notes_menu,
                           state="normal" if (d / "transcript.txt").exists() else "disabled")
+            m.add_command(label="Add handwritten notes...", command=lambda: self.add_handwriting(d))
             m.add_command(label="Tell speakers apart", command=lambda: self.enqueue_speakers(d),
                           state="normal" if (d / "transcript.srt").exists() else "disabled")
         m.add_separator()
@@ -1505,6 +1537,23 @@ class App:
         else:
             self.set_status("Names saved.")
         return True
+
+    def add_handwriting(self, d):
+        """Photos of paper notes -> handwritten.md (read on your server or this PC's Ollama), then fresh notes."""
+        files = filedialog.askopenfilenames(parent=self.root, title="Photos of your handwritten notes",
+                                            filetypes=[("Photos", "*.jpg *.jpeg *.png"), ("All files", "*.*")])
+        if not files:
+            return
+        cfg = self._transcript_settings()
+        if not (cfg.get("server_url") and secret_get(cfg, "server_key")) and not cfg.get("ollama_url"):
+            if not messagebox.askyesno(APP, "Reading handwriting needs your CryRec server, or Ollama on this PC "
+                                            f"({sm.DEFAULT_OLLAMA_URL}) with a vision model (gemma3:4b).\n\nTry Ollama "
+                                            "on this PC?", parent=self.root):
+                return
+        cfg["_images"] = list(files)
+        if cfg.get("notes_engine", "off") != "off" and not self._notes_ready(cfg):
+            cfg["notes_engine"] = "off"
+        self._queue(d, cfg, "handwriting")
 
     def enqueue_speakers(self, d):
         if not (d / "transcript.srt").exists():
@@ -1877,7 +1926,8 @@ class App:
             self.running = key
             self.t_cancel.clear()
             errors = {}
-            self._t_ui(busy=True, job=(key, {"stage": {"all": "transcript"}.get(mode, mode), "progress": 0,
+            self._t_ui(busy=True, job=(key, {"stage": {"all": "transcript", "handwriting": "scan"}.get(mode, mode),
+                                             "progress": 0,
                                              "errors": {}}))
 
             def stage(name, key=key):
@@ -1908,10 +1958,13 @@ class App:
                             raise
                         except Exception as e:
                             errors["cleanup"] = str(e)
+                if mode == "handwriting":
+                    run_handwriting(cfg, session_dir, cfg["_images"], progress, self.t_cancel.is_set)
+                    msg = "Handwritten notes added."
                 if mode == "speakers":
                     n = run_speakers(session_dir, progress, self.t_cancel.is_set)
                     msg = f"{n} speakers found. Name them in View." if n else "Nothing to tell apart."
-                elif cfg.get("notes_engine", "off") != "off":
+                elif cfg.get("notes_engine", "off") != "off" and (session_dir / "transcript.txt").exists():
                     stage("notes")
                     try:
                         run_notes(cfg, session_dir, progress, self.t_cancel.is_set)

@@ -54,6 +54,8 @@ android {
 }
 
 dependencies {
+    // Google document scanner (edge detect, perspective, cleanup) runs in Play services; adds ~0.3 MB here
+    implementation("com.google.android.gms:play-services-mlkit-document-scanner:16.0.0")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20250517")  // real org.json for JVM tests (android.jar only has stubs)
 }

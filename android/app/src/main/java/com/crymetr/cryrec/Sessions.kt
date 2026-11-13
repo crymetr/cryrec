@@ -18,6 +18,18 @@ class Session(val dir: File) {
     val srt get() = File(dir, "transcript.srt")
     val rawTranscript get() = File(dir, "transcript.raw.txt")
     val notes get() = File(dir, "notes.md")
+    val scans get() = File(dir, "scans")
+    val handwritten get() = File(dir, "handwritten.md")
+
+    /** Scanned pages not read yet (handwritten.md has a "### Page N" heading for every page read). */
+    fun unreadScans(): List<File> {
+        val done = Regex("^### Page (\\d+)", RegexOption.MULTILINE).findAll(readOr(handwritten))
+            .map { it.groupValues[1].toInt() }.toSet()
+        return (scans.listFiles { f -> f.name.startsWith("page_") } ?: emptyArray()).sortedBy { pageNo(it) }
+            .filter { pageNo(it) !in done }
+    }
+
+    fun pageNo(f: File) = f.name.removePrefix("page_").substringBefore('.').toIntOrNull() ?: 0
     private val stateFile get() = File(dir, "state.json")
 
     /** status: recording | queued | working | done | failed | saved (no server set) */

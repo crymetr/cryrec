@@ -32,6 +32,7 @@ class DetailActivity : Activity() {
     private var showNotes = true
     private var lastKey = ""
     private val ui = Handler(Looper.getMainLooper())
+    private val REQ_SCAN = 11
     private val tick = object : Runnable {
         override fun run() { refresh(); ui.postDelayed(this, 1000) }
     }
@@ -136,7 +137,8 @@ class DetailActivity : Activity() {
         if (!session.dir.exists()) return finish()
         val st = session.state()
         val s = st.optString("status", "saved")
-        val notes = session.readOr(session.notes)
+        // the notes tab also shows the handwritten pages read from photos
+        val notes = listOf(session.readOr(session.notes), session.readOr(session.handwritten)).filter { it.isNotBlank() }.joinToString("\n\n")
         val transcript = session.readOr(session.transcript)
         val key = listOf(s, st.optString("detail"), showNotes, notes.length, transcript.length).joinToString("|")
         if (key == lastKey) return
@@ -179,6 +181,7 @@ class DetailActivity : Activity() {
                 RecorderService.send(this, RecorderService.ACTION_PROCESS)
             })
         if (s == "done" && Speakers.load(session.dir).isNotEmpty()) actions.addView(pill("Names") { showNames() })
+        if ((s == "done" || s == "saved" || s == "failed") && Prefs(this).configured) actions.addView(pill("Scan notes") { scan() })
         if (s == "done" && Prefs(this).notesEngine != "off") actions.addView(pill("Redo notes") {
             session.notes.delete()
             session.update("status" to "queued")
@@ -225,6 +228,45 @@ class DetailActivity : Activity() {
             putExtra(Intent.EXTRA_SUBJECT, (if (showNotes) "Meeting notes " else "Transcript ") + session.name)
             putExtra(Intent.EXTRA_TEXT, text)
         }, null))
+    }
+
+    /** Photograph paper notes with Google's document scanner (crop, straighten, clean up); the server reads them. */
+    private fun scan() {
+        val options = com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions.Builder()
+            .setScannerMode(com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions.SCANNER_MODE_FULL)
+            .setResultFormats(com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions.RESULT_FORMAT_JPEG)
+            .setGalleryImportAllowed(true)
+            .setPageLimit(20)
+            .build()
+        com.google.mlkit.vision.documentscanner.GmsDocumentScanning.getClient(options).getStartScanIntent(this)
+            .addOnSuccessListener { sender -> startIntentSenderForResult(sender, REQ_SCAN, null, 0, 0, 0) }
+            .addOnFailureListener {
+                android.widget.Toast.makeText(this, "The scanner needs Google Play services: ${it.message}",
+                    android.widget.Toast.LENGTH_LONG).show()
+            }
+    }
+
+    @Deprecated("Activity result without AndroidX")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQ_SCAN || resultCode != RESULT_OK) return
+        val pages = com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult.fromActivityResultIntent(data)
+            ?.pages ?: return
+        Thread {
+            session.scans.mkdirs()
+            var n = (session.scans.listFiles()?.maxOfOrNull { session.pageNo(it) } ?: 0)
+            for (page in pages) runCatching {
+                contentResolver.openInputStream(page.imageUri)?.use { inp ->
+                    java.io.File(session.scans, "page_%02d.jpg".format(++n)).outputStream().use { inp.copyTo(it) }
+                }
+            }
+            session.update("status" to "queued", "error" to null)
+            RecorderService.send(this, RecorderService.ACTION_PROCESS)
+            runOnUiThread {
+                android.widget.Toast.makeText(this, "${pages.size} page(s) added. Reading them…", android.widget.Toast.LENGTH_SHORT).show()
+                lastKey = ""; refresh()
+            }
+        }.start()
     }
 
     /** "Who is who?": play each speaker's sample, type a name. Same name twice = same person. */

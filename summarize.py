@@ -10,6 +10,7 @@ Small-context backends split long transcripts into chunks, take notes per chunk,
 import json
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 NOTES_LANGUAGES = {"English": "English", "Turkish": "Turkish", "Same as meeting": None}
 DEFAULT_CLAUDE_MODEL = "claude-opus-5-5"
@@ -332,3 +333,43 @@ def write_notes(session_dir, notes_md, meeting=None):
         head += "\n\nAttendees: " + ", ".join(meeting["attendees"])
     out.write_text(f"{head}\n\n{notes_md.strip()}\n", encoding="utf-8")
     return out
+
+
+OCR_PROMPT = ("Transcribe the handwritten notes in this photo exactly, line by line. Keep the original language "
+              "(for example Turkish or English, with their own letters), names, product codes and numbers as "
+              "written. Keep list dashes and arrows as - and ->. Do not add, fix or explain anything. If a word "
+              "can't be read, write [?]. Answer with the text only.")
+
+
+def read_handwriting(image, url=DEFAULT_OLLAMA_URL, model="gemma3:4b", glossary=(), timeout=600):
+    """Text of a photographed page (JPEG/PNG bytes) through a local Ollama vision model."""
+    import base64
+    prompt = OCR_PROMPT + (("\nNames and terms that may appear: " + ", ".join(glossary[:200])) if glossary else "")
+    body = json.dumps({"model": model, "stream": False, "keep_alive": "2m",
+                       "options": {"temperature": 0, "num_ctx": 8192},
+                       "messages": [{"role": "user", "content": prompt,
+                                     "images": [base64.b64encode(image).decode()]}]}).encode()
+    req = urllib.request.Request(f"{(url or DEFAULT_OLLAMA_URL).rstrip('/')}/api/chat", data=body, method="POST",
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.load(r)["message"]["content"].strip()
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Could not reach Ollama at {url}: {e.reason}") from None
+
+
+def with_handwriting(session_dir, transcript):
+    """handwritten.md (pages read from photos) goes after the transcript, so the notes use it too."""
+    try:
+        hw = (Path(session_dir) / "handwritten.md").read_text(encoding="utf-8").strip()
+    except OSError:
+        return transcript
+    return (transcript.rstrip() + "\n\nThe user's own handwritten notes from this meeting (read from photos, "
+            "may contain reading errors):\n" + hw + "\n") if hw else transcript
+
+
+def remote_ocr(url, key, image, progress, cancel, vocabulary=""):
+    """Ask a CryRec server to read a photographed page with its local vision model."""
+    import base64
+    return _remote_job(url, key, "/ocr", {"image_b64": base64.b64encode(image).decode(), "vocabulary": vocabulary},
+                       "txt", progress, cancel)

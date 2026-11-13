@@ -104,6 +104,10 @@ Named voices are remembered on this PC; next time a matching voice is suggested 
 
 Measured on a public 4-person meeting squeezed to Teams-like 24 kbps audio: 94% of the transcribed speech got the right speaker. Short interjections and people talking over each other are the usual mistakes.
 
+## Handwritten notes
+
+Paper notes from a meeting can join its transcript. Desktop: ⋯ > **Add handwritten notes...** and pick photos. Android: open a recording > **Scan notes**: Google's document scanner (the one many apps use) finds the page edges, straightens and cleans the photo; several pages at once. The pages are read by a local vision model, on your CryRec server (`ocr_model`, default `gemma3:4b` through its Ollama) or, without a server, by Ollama on this PC. The text lands in `handwritten.md` (photos in `scans\`), shows under Notes, and the notes are written again with it. Messy handwriting comes out with mistakes; unreadable words are marked `[?]`.
+
 ## Actions
 
 A recording's ⋯ menu and the viewer have **Copy for AI chat** (a ready prompt with the meeting's file paths, to paste into any AI chat or coding agent) and your own **actions**. **⋯ > Edit actions...** opens `actions.txt`; one action per line, `Name | command`, with `{folder}`, `{transcript}`, `{notes}` and `{title}` filled in. Commands run directly (no shell), with the recording folder as the working directory. For example, to open a terminal AI session about a meeting:
@@ -135,6 +139,7 @@ The server only listens on localhost. Put HTTPS in front of it (Cloudflare Tunne
 - `vocabulary_file` (default `%APPDATA%\CryRec\vocabulary.txt`) is merged with each client's vocabulary.
 - `/health` also reports the NVIDIA power limit and P-state, handy for an outside watchdog.
 - `share_dir`: a folder for the phone's **Send to my PC** (below). Each share lands in its own subfolder: `share.json` (the shared text or link, its subject and your note), the files under `files\`, and an empty `ready` file written last. What happens next is up to you: a script that watches the folder can open, file or forward each share. Empty (the default) turns sharing off.
+- `ocr_model`: the Ollama vision model that reads photographed handwritten notes (`POST /ocr`), default `gemma3:4b`. Runs locally, never in the cloud.
 - `voices_file`: where the server keeps the voices clients named (phone recordings get Speaker 1, 2... when the app asks for it). Empty (the default) = `voices.json` next to `server.json`. Only numbers describing each voice are stored, never audio.
 
 The API is documented at the top of `server/cryrec_server.py`.
@@ -177,6 +182,7 @@ Each recording gets its own folder under the save location (installed: `Document
 - `transcript.raw.txt`: the transcript before Clean up, when Clean up is on
 - `notes.md`: meeting notes, when a notes engine is picked
 - `bookmarks.json`: moments marked with Win+Alt+M
+- `handwritten.md` and `scans\`: handwritten notes read from photos, and the photos
 - `speakers.json`: the speakers found, their names and a voice summary (numbers, not audio)
 
 ## Privacy
@@ -246,5 +252,6 @@ powershell -File packaging\build.ps1
 - v0.18: who said what: Speaker 1, 2... on the other side, name them once, voices remembered
 - v0.19: who said what on the phone too (split on your server, named in the app)
 - v0.20: Android listen mode: notices a conversation and asks whether to record it
-- v0.21: calls in the browser and Outlook meetings starting now (desktop), calendar meeting reminders (Android) (this)
+- v0.21: calls in the browser and Outlook meetings starting now (desktop), calendar meeting reminders (Android)
+- v0.22: handwritten notes: scan or pick photos, read by a local vision model, used in the notes (this)
 - next: smarter answers over the archive, handwritten notes, better meeting detection

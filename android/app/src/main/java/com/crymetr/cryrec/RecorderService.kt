@@ -125,10 +125,23 @@ class RecorderService : Service() {
                 s.rawTranscript.writeText(raw)
                 s.transcript.writeText(j.optString("txt"))
             }
-            if (p.notesEngine != "off" && !s.notes.exists()) {
+            val unread = s.unreadScans()
+            if (unread.isNotEmpty()) {  // photographed paper notes -> handwritten.md, then the notes get redone
+                for ((i, page) in unread.withIndex()) {
+                    step("reading handwriting ${i + 1}/${unread.size}")
+                    val j = api.waitJob(api.ocr(page.readBytes(), p.vocabulary), isCancelled) { step("reading handwriting") }
+                    val old = s.readOr(s.handwritten).ifEmpty { "# Handwritten notes\n" }
+                    s.handwritten.writeText(old.trimEnd() + "\n\n### Page ${s.pageNo(page)}\n\n" + j.optString("txt").trim() + "\n")
+                }
+                s.notes.delete()
+            }
+            if (p.notesEngine != "off" && !s.notes.exists() && s.transcript.exists()) {
                 step("writing notes")
                 val backend = if (p.notesEngine == "server_local") "local" else "claude"
-                val id = api.notes(s.transcript.readText(), backend, p.language, p.myName, p.vocabulary)
+                val hw = s.readOr(s.handwritten).trim()
+                val input = s.transcript.readText().trimEnd() + if (hw.isEmpty()) "" else
+                    "\n\nThe user's own handwritten notes from this meeting (read from photos, may contain reading errors):\n$hw\n"
+                val id = api.notes(input, backend, p.language, p.myName, p.vocabulary)
                 val j = api.waitJob(id, isCancelled) { step(it.ifEmpty { "writing notes" }) }
                 s.notes.writeText(j.optString("md"))
             }
