@@ -178,6 +178,7 @@ class DetailActivity : Activity() {
                 session.update("status" to "queued", "error" to null)
                 RecorderService.send(this, RecorderService.ACTION_PROCESS)
             })
+        if (s == "done" && Speakers.load(session.dir).isNotEmpty()) actions.addView(pill("Names") { showNames() })
         if (s == "done" && Prefs(this).notesEngine != "off") actions.addView(pill("Redo notes") {
             session.notes.delete()
             session.update("status" to "queued")
@@ -224,6 +225,72 @@ class DetailActivity : Activity() {
             putExtra(Intent.EXTRA_SUBJECT, (if (showNotes) "Meeting notes " else "Transcript ") + session.name)
             putExtra(Intent.EXTRA_TEXT, text)
         }, null))
+    }
+
+    /** "Who is who?": play each speaker's sample, type a name. Same name twice = same person. */
+    private fun showNames() {
+        val entries = Speakers.load(session.dir)
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(8), dp(20), 0) }
+        list.addView(TextView(this).apply {
+            text = "Play a sample, then type the name. Give two speakers the same name if they are one person."
+            textSize = 13f; setTextColor(getColor(R.color.muted)); setPadding(0, 0, 0, dp(8))
+        })
+        val fields = LinkedHashMap<String, android.widget.EditText>()
+        for (e in entries) {
+            val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(4), 0, dp(4)) }
+            row.addView(pill("▶") {
+                val m = prepare() ?: return@pill
+                m.seekTo(((e.sample + 1) * 1000).toInt())
+                if (!m.isPlaying) togglePlay() else showPosition()
+            })
+            val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            col.addView(TextView(this).apply {
+                text = e.label + "  ·  " + formatDuration(e.seconds.toLong()) +
+                    if (e.name.isEmpty() && e.suggest.isNotEmpty()) "  ·  suggested" else ""
+                textSize = 12f; setTextColor(getColor(R.color.muted))
+            })
+            val edit = android.widget.EditText(this).apply {
+                setText(e.name.ifEmpty { e.suggest })
+                hint = "Name"
+                setSingleLine()
+                textSize = 15f
+                setTextColor(getColor(R.color.text))
+            }
+            col.addView(edit)
+            row.addView(col, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            list.addView(row)
+            fields[e.label] = edit
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Who is who?")
+            .setView(ScrollView(this).apply { addView(list) })
+            .setPositiveButton("Save names") { _, _ ->
+                val typed = fields.mapValues { it.value.text.toString() }
+                val p = Prefs(this)
+                Thread {  // file rewrites and uploads off the UI thread
+                    val named = runCatching { Speakers.apply(session.dir, typed) }
+                    runOnUiThread {
+                        named.onFailure {
+                            android.widget.Toast.makeText(this, "Can't save: ${it.message}", android.widget.Toast.LENGTH_LONG).show()
+                        }.onSuccess { list ->
+                            lastKey = ""
+                            refresh()
+                            if (list.isNotEmpty() && p.notesEngine != "off" && session.notes.exists())
+                                AlertDialog.Builder(this).setMessage("Names saved. Rewrite the notes with these names?")
+                                    .setPositiveButton("Rewrite") { _, _ ->
+                                        session.notes.delete()
+                                        session.update("status" to "queued")
+                                        RecorderService.send(this, RecorderService.ACTION_PROCESS)
+                                    }
+                                    .setNegativeButton("Not now", null).show()
+                        }
+                    }
+                    if (p.configured) for (e in named.getOrDefault(emptyList()))  // the server remembers the voices
+                        runCatching { Api(p).voice(e.shown, e.info.getJSONArray("vec"), e.seconds) }
+                }.start()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun confirmDelete() {

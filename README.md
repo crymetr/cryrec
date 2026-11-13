@@ -133,6 +133,7 @@ The server only listens on localhost. Put HTTPS in front of it (Cloudflare Tunne
 - `vocabulary_file` (default `%APPDATA%\CryRec\vocabulary.txt`) is merged with each client's vocabulary.
 - `/health` also reports the NVIDIA power limit and P-state, handy for an outside watchdog.
 - `share_dir`: a folder for the phone's **Send to my PC** (below). Each share lands in its own subfolder: `share.json` (the shared text or link, its subject and your note), the files under `files\`, and an empty `ready` file written last. What happens next is up to you: a script that watches the folder can open, file or forward each share. Empty (the default) turns sharing off.
+- `voices_file`: where the server keeps the voices clients named (phone recordings get Speaker 1, 2... when the app asks for it). Empty (the default) = `voices.json` next to `server.json`. Only numbers describing each voice are stored, never audio.
 
 The API is documented at the top of `server/cryrec_server.py`.
 
@@ -145,6 +146,7 @@ The API is documented at the top of `server/cryrec_server.py`.
 - **Gain**: 0 to +24 dB, in Settings or with - / + while recording. A soft limiter keeps boosted loud parts from distorting (output stays under -0.2 dBFS).
 - **Microphone**: Settings > Recording. "Phone mic" (default) keeps recording the room even with headphones plugged in; "Headset mic" uses a wired or USB headset; "Automatic" lets Android pick. Some phones ignore the choice for wired headsets; the meter line shows which mic is in use.
 - **Listen**: open a recording and tap Listen to play it back, with a slider to jump around.
+- **Who is who**: the server splits the phone's single track into Speaker 1, Speaker 2... (needs a 0.13+ server). Open a recording > **Names**: ▶ plays each speaker's sample, type the name and Save names; the transcript switches to the names and you can rewrite the notes. Give two speakers the same name if they are one person. Names are sent to your server, which remembers the voices and suggests them next time.
 - When you stop, the recording is sent to your server. The transcript, the optional Clean up and the notes come back into the app. Share sends them to any app as text. Without a server set, recordings stay on the phone until you add one.
 - **Dictation keyboard**: Settings > Turn on keyboard, then pick "CryRec dictation" with the keyboard button. Tap the mic, talk, tap again (or hold the mic and let go). The text is typed where the cursor is. ⌫ cancels while it listens. The keyboard button switches back to your normal keyboard.
 - **Floating mic**: a small mic button that appears a little above the keyboard while you type, in any app (web pages in Chrome too), with any keyboard (Gboard, Samsung, ...), and is gone when the keyboard is. Tap it, talk, tap again: the text goes into the field at the cursor. Long press cancels. Drag it anywhere; it remembers the side and the height. On Xiaomi/HyperOS and some other phones, allow Autostart and set battery to "No restrictions" for CryRec, or Android may stop the floating mic in the background. Turn it on in Settings > Floating mic (Android Accessibility). Because the APK does not come from Play, Android may first say "Restricted setting": App info > ⋮ > Allow restricted settings, then turn it on again. It only reads the focused text field (to insert your words); fields that refuse direct typing get a paste instead.
@@ -237,5 +239,6 @@ powershell -File packaging\build.ps1
 - v0.15: recordings named after the meeting (Outlook calendar or Teams), attendee names in the transcript and notes
 - v0.16: Android level meter (dBFS), gain boost with limiter, mic choice, play back recordings
 - v0.17: transcript viewer with player (click a line to hear it), search across all recordings, bookmarks, actions
-- v0.18: who said what: Speaker 1, 2... on the other side, name them once, voices remembered (this)
+- v0.18: who said what: Speaker 1, 2... on the other side, name them once, voices remembered
+- v0.19: who said what on the phone too (split on your server, named in the app) (this)
 - next: smarter answers over the archive, handwritten notes, better meeting detection

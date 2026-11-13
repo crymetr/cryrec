@@ -10,7 +10,9 @@ a request a local Ollama is still running, so both don't share the GPU; needs ps
 
 API (all need "Authorization: Bearer <key>"):
     GET    /health            {ok, version, model, device}
-    POST   /jobs?language=&name=   body = zip with me.mp3 / them.mp3 (or meeting.mp3 / .m4a) -> {id}
+    POST   /jobs?language=&name=&speakers=1   body = zip with me.mp3 / them.mp3 (or meeting.mp3 / .m4a) -> {id}
+                               speakers=1: the other side / single track is split into Speaker 1..N
+    POST   /voices            JSON {name, vec, seconds}: a client named a speaker (suggested next time)
     POST   /notes             JSON {transcript, backend: local|claude, language, my_name, vocabulary} -> {id}
     POST   /clean             JSON {transcript, vocabulary} -> {id}   (Claude fixes casing/punctuation/terms)
     POST   /dictate           JSON {audio_b64, ext, language, polish, model, vocabulary} -> {text, raw}
@@ -22,7 +24,7 @@ API (all need "Authorization: Bearer <key>"):
                               saved to share_dir/<id>/ (off while share_dir is empty); a "ready" file
                               is written last, so a watcher on that folder never sees a half-written share
     GET    /jobs/<id>         {status: queued|running|done|failed, progress, text, error,
-                               txt+srt (transcript) | md (notes) | txt+kept (clean)}
+                               txt+srt (+speakers) (transcript) | md (notes) | txt+kept (clean)}
 A zip may also carry vocab.txt; it is merged with the server's vocabulary_file.
     DELETE /jobs/<id>         cancel
 Audio is deleted as soon as a job finishes; transcripts are kept keep_hours for the client to fetch.
@@ -50,10 +52,11 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import diarize as dz  # noqa: E402
 import summarize as sm  # noqa: E402
 import transcribe as tr  # noqa: E402
 
-VERSION = "0.12.0"
+VERSION = "0.13.0"
 APPDATA = Path(os.environ.get("APPDATA", Path.home())) / "CryRec"
 LOCALAPPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "CryRec"
 DEFAULTS = {
@@ -77,6 +80,8 @@ DEFAULTS = {
     "vocabulary_file": str(APPDATA / "vocabulary.txt"),
     # phone "Share to my PC": folder that receives shared text/files; empty = off
     "share_dir": "",
+    # speakers told apart on request (phone recordings): names learned from clients; empty = next to server.json
+    "voices_file": "",
 }
 MAX_VOCAB = 64 * 1024
 MAX_DICTATE_BODY = 12 * 1024 * 1024
@@ -222,7 +227,7 @@ class Jobs:
             server_vocab = ""
         return server_vocab + "\n" + (client_vocab or "")
 
-    def add(self, body, language, name):
+    def add(self, body, language, name, speakers=False):
         job_id = uuid.uuid4().hex
         safe = re.sub(r"[^\w\- ]", "_", name or "meeting")[:80] or "meeting"
         d = self.root / job_id / safe
@@ -241,6 +246,7 @@ class Jobs:
             shutil.rmtree(d.parent, ignore_errors=True)
             raise
         job = {"id": job_id, "dir": d, "language": language or "Auto", "status": "queued", "vocab": vocab,
+               "speakers": speakers,
                "progress": 0.0, "text": "waiting", "created": time.time(), "cancel": threading.Event()}
         with self.lock:
             self.jobs[job_id] = job
@@ -397,6 +403,18 @@ class Jobs:
                 out = tr.transcribe_session(job["dir"], engine, job["language"],
                                             lambda f, t: job.update(progress=f, text=t), job["cancel"].is_set,
                                             self.vocabulary(job.get("vocab")))
+                if job.get("speakers"):
+                    job["text"] = "telling speakers apart"
+                    try:  # optional: a failure keeps the plain transcript
+                        n = dz.run_session(job["dir"], Path(self.cfg["models_dir"]), self.cfg["voices_file"], tr,
+                                           lambda f, t: job.update(progress=f, text=t), job["cancel"].is_set)
+                        if n:
+                            sp = json.loads((job["dir"] / "speakers.json").read_text(encoding="utf-8"))
+                            job["speakers_json"] = sp
+                    except dz.Cancelled:
+                        raise tr.Cancelled()
+                    except Exception as e:
+                        log(f"job {job_id[:8]} speakers failed: {e!r}")
                 job["txt"] = out.read_text(encoding="utf-8")
                 job["srt"] = (job["dir"] / "transcript.srt").read_text(encoding="utf-8")
                 job["status"], job["progress"] = "done", 1.0
@@ -513,6 +531,8 @@ def make_handler(cfg, jobs):
                     out.update(result=job["result"], raw=job["raw"], polished=job["polish"])
                 else:
                     out.update(txt=job["txt"], srt=job["srt"])
+                    if job.get("speakers_json"):
+                        out["speakers"] = job["speakers_json"]
             self._send(200, out)
 
         def do_POST(self):
@@ -572,6 +592,21 @@ def make_handler(cfg, jobs):
                     return self._send(400, {"error": f"bad share: {e}"})
                 log(f"share {sid} received ({n // 1024} KB)")
                 return self._send(200, {"id": sid})
+            if u.path == "/voices":  # a client named a speaker: remember the voice for suggestions
+                n = int(self.headers.get("Content-Length") or 0)
+                if not 0 < n <= 64 * 1024:
+                    return self._send(413, {"error": "body missing or too large"})
+                try:
+                    p = json.loads(self.rfile.read(n))
+                    name = dz.clean_name(str(p["name"]))
+                    vec = [float(x) for x in p["vec"][:dz.DIM + 1]]
+                    if not name or len(vec) != dz.DIM or not all(abs(x) <= 1.0 for x in vec):
+                        raise ValueError("bad name or voice")
+                    dz.remember(cfg["voices_file"], name, vec, max(0.0, min(float(p.get("seconds", 0)), 36000.0)))
+                except (ValueError, KeyError, TypeError) as e:
+                    return self._send(400, {"error": f"bad request: {e}"})
+                log(f"voice saved: {name}")
+                return self._send(200, {"ok": True})
             if u.path != "/jobs":
                 return self._send(404, {"error": "not found"})
             n = int(self.headers.get("Content-Length") or 0)
@@ -579,7 +614,8 @@ def make_handler(cfg, jobs):
                 return self._send(413, {"error": "body missing or too large"})
             body = self.rfile.read(n)
             try:
-                job_id = jobs.add(body, q.get("language", ["Auto"])[0], q.get("name", ["meeting"])[0])
+                job_id = jobs.add(body, q.get("language", ["Auto"])[0], q.get("name", ["meeting"])[0],
+                                  q.get("speakers", ["0"])[0] == "1")
             except (ValueError, zipfile.BadZipFile) as e:
                 return self._send(400, {"error": str(e)})
             self._send(200, {"id": job_id})
@@ -615,6 +651,7 @@ def main():
         print(f"config: {path}\nkey:    {cfg['key']}")
         if args.init:
             return
+    cfg["voices_file"] = cfg.get("voices_file") or str(path.parent / "voices.json")
     global LOG_FILE
     LOG_FILE = cfg.get("log_file") or None
     jobs = Jobs(cfg)

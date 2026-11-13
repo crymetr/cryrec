@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.IBinder
 import android.os.PowerManager
+import java.io.File
 import android.os.SystemClock
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -115,6 +116,7 @@ class RecorderService : Service() {
                 val j = api.waitJob(id, isCancelled) { step(it.ifEmpty { "transcribing" }) }
                 s.srt.writeText(j.optString("srt"))
                 s.transcript.writeText(j.optString("txt"))
+                j.optJSONObject("speakers")?.let { File(s.dir, "speakers.json").writeText(it.toString(1)) }
             }
             if (p.cleanEngine != "off" && !s.rawTranscript.exists()) {
                 step("cleaning up the transcript")

@@ -55,6 +55,7 @@ android {
 
 dependencies {
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20250517")  // real org.json for JVM tests (android.jar only has stubs)
 }
 
 kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }

@@ -59,7 +59,7 @@ class Api(private val base: String, private val key: String) {
     fun warm() { call("POST", "/warm") }
 
     /** Upload one recording (meeting.m4a). Returns the job id. */
-    fun submit(audio: File, language: String, name: String, vocabulary: String): String {
+    fun submit(audio: File, language: String, name: String, vocabulary: String, speakers: Boolean = true): String {
         val buf = ByteArrayOutputStream()
         ZipOutputStream(buf).use { z ->
             z.putNextEntry(ZipEntry("meeting.m4a")); audio.inputStream().use { it.copyTo(z) }; z.closeEntry()
@@ -67,7 +67,8 @@ class Api(private val base: String, private val key: String) {
                 z.putNextEntry(ZipEntry("vocab.txt")); z.write(vocabulary.toByteArray()); z.closeEntry()
             }
         }
-        val q = "language=" + URLEncoder.encode(language, "UTF-8") + "&name=" + URLEncoder.encode(name, "UTF-8")
+        val q = "language=" + URLEncoder.encode(language, "UTF-8") + "&name=" + URLEncoder.encode(name, "UTF-8") +
+            if (speakers) "&speakers=1" else ""
         return call("POST", "/jobs?$q", buf.toByteArray(), "application/zip", 120_000).getString("id")
     }
 
@@ -84,6 +85,11 @@ class Api(private val base: String, private val key: String) {
         call("POST", "/share", type = "application/zip", readTimeoutMs = 120_000, file = zip).getString("id")
 
     fun job(id: String): JSONObject = call("GET", "/jobs/$id")
+
+    /** A speaker was named: the server remembers the voice and suggests the name next time. */
+    fun voice(name: String, vec: org.json.JSONArray, seconds: Double) {
+        json("/voices", JSONObject().put("name", name).put("vec", vec).put("seconds", seconds))
+    }
 
     fun cancel(id: String) { call("DELETE", "/jobs/$id") }
 

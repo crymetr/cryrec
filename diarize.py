@@ -12,6 +12,7 @@ suggest the name next time. A suggestion is always shown for confirmation, never
 """
 import json
 import re
+import threading
 import urllib.request
 from pathlib import Path
 
@@ -21,6 +22,7 @@ MODEL_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-re
              "wespeaker_en_voxceleb_resnet34_LM.onnx")
 MODEL_NAME = "wespeaker_en_voxceleb_resnet34_LM.onnx"
 MODEL_BYTES = 26530550
+DIM = 256  # embedding size of this model
 RATE = 16000
 WIN = 3.0          # seconds per embedding window
 THRESHOLD = 0.5    # average cosine similarity needed to join two groups
@@ -175,7 +177,7 @@ def suggest(voices, vec, taken=()):
     """(name, similarity) of the closest saved voice above VOICE_MATCH, else (None, best similarity)."""
     best, best_s = None, -1.0
     for name, v in voices.items():
-        if name in taken:
+        if name in taken or len(v.get("vec", ())) != len(vec):  # skip voices from another model
             continue
         s = float(np.asarray(v["vec"]) @ vec)
         if s > best_s:
@@ -183,8 +185,16 @@ def suggest(voices, vec, taken=()):
     return (best, best_s) if best_s >= VOICE_MATCH else (None, best_s)
 
 
+_voices_lock = threading.Lock()  # the server may get two /voices calls at once
+
+
 def remember(path, name, vec, seconds):
     """Fold a confirmed speaker into the saved voice (weighted by speech time, capped so it keeps adapting)."""
+    with _voices_lock:
+        _remember(path, name, vec, seconds)
+
+
+def _remember(path, name, vec, seconds):
     voices = load_voices(path)
     old = voices.get(name)
     vec = np.asarray(vec, dtype=np.float64)
@@ -197,7 +207,9 @@ def remember(path, name, vec, seconds):
     else:
         voices[name] = {"vec": [round(float(x), 5) for x in vec], "seconds": seconds, "meetings": 1}
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    Path(path).write_text(json.dumps(voices), encoding="utf-8")
+    tmp = Path(str(path) + ".tmp")
+    tmp.write_text(json.dumps(voices), encoding="utf-8")
+    tmp.replace(path)  # readers never see a half-written file
 
 
 # ---------- recording folders ----------
