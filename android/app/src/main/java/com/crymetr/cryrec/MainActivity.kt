@@ -48,6 +48,9 @@ class MainActivity : Activity() {
         banner = findViewById(R.id.banner)
         findViewById<View>(R.id.settings).setOnClickListener { startActivity(Intent(this, SettingsActivity::class.java)) }
         record.setOnClickListener { toggleRecording() }
+        listen = findViewById(R.id.listen)
+        listen.setOnClickListener { toggleListen() }
+        listen.setOnLongClickListener { pickListenHours(); true }
         levels = findViewById(R.id.levels)
         levelText = findViewById(R.id.level_text)
         gainValue = findViewById(R.id.gain_value)
@@ -68,6 +71,8 @@ class MainActivity : Activity() {
         super.onResume()
         visible = true
         lastListKey = ""
+        showListen()
+        refreshListen = { runOnUiThread { showListen() } }
         ui.post(tick)
         ui.post(meterTick)
         // Pick up recordings that were queued while the server was not set or the app was closed.
@@ -77,6 +82,7 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         visible = false
+        refreshListen = null
         ui.removeCallbacks(tick)
         ui.removeCallbacks(meterTick)
         super.onPause()
@@ -89,6 +95,36 @@ class MainActivity : Activity() {
             "recording" -> s.update("status" to "failed", "error" to "The recording was interrupted.")
             "working" -> s.update("status" to "queued", "detail" to null)
         }
+    }
+
+    private lateinit var listen: TextView
+
+    /** Listen mode: asks "Record this?" when it hears a conversation. Long press = how long it stays on. */
+    private fun toggleListen() {
+        if (ListenService.active) { ListenService.stop(this); ui.postDelayed({ showListen() }, 300); return }
+        val need = listOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS)
+            .filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        if (need.isNotEmpty()) { requestPermissions(need.toTypedArray(), REQ_LISTEN); return }
+        ListenService.start(this)
+        ui.postDelayed({ showListen() }, 300)
+    }
+
+    private fun pickListenHours() {
+        val options = intArrayOf(1, 2, 3, 4, 6, 8)
+        android.app.AlertDialog.Builder(this).setTitle("Listen mode stays on for")
+            .setItems(options.map { "$it hour" + if (it > 1) "s" else "" }.toTypedArray()) { _, i ->
+                Prefs(this).listenHours = options[i]
+                if (ListenService.active) ListenService.start(this)  // restart the timer
+                showListen()
+            }.show()
+    }
+
+    private fun showListen() {
+        listen.text = if (ListenService.active)
+            "Listening until " + java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+                .format(java.util.Date(ListenService.endsAtWall)) + "  ·  tap to stop"
+        else "Listen for conversations (${Prefs(this).listenHours} h)"
+        listen.alpha = if (ListenService.active) 1f else 0.75f
     }
 
     private fun toggleRecording() {
@@ -108,6 +144,17 @@ class MainActivity : Activity() {
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        if (requestCode == REQ_LISTEN) {
+            // it only asks through notifications, so it needs both
+            if (listOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS)
+                    .all { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }) {
+                ListenService.start(this)
+                ui.postDelayed({ showListen() }, 300)
+            } else showBanner("Listen mode needs the microphone and notifications (it asks you with a notification).", "listen") {
+                startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.fromParts("package", packageName, null)))
+            }
+        }
         if (requestCode == REQ_RECORD) {
             if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
                 RecorderService.send(this, RecorderService.ACTION_RECORD)
@@ -237,6 +284,9 @@ class MainActivity : Activity() {
     companion object {
         private const val REQ_RECORD = 1
         private const val REQ_MIC = 2
+        private const val REQ_LISTEN = 3
+        /** Set while this screen is visible, so listen mode can update the button. */
+        @Volatile var refreshListen: (() -> Unit)? = null
         const val EXTRA_ASK_MIC = "ask_mic"
         const val REPO = "crymetr/cryrec"
         /** For the updater: show the install prompt directly only while the app is on screen. */

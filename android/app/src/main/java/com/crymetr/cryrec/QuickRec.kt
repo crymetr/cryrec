@@ -47,13 +47,19 @@ class QuickRecWidget : AppWidgetProvider() {
 class QuickRecActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val startOnly = intent.getBooleanExtra(EXTRA_START_ONLY, false)  // from the listen-mode prompt
+        if (startOnly) getSystemService(android.app.NotificationManager::class.java).cancel(42)
         when {
-            RecorderService.recording != null -> RecorderService.send(this, RecorderService.ACTION_STOP)
+            RecorderService.recording != null -> if (!startOnly) RecorderService.send(this, RecorderService.ACTION_STOP)
             checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED ->
                 RecorderService.send(this, RecorderService.ACTION_RECORD)
             else -> startActivity(Intent(this, MainActivity::class.java).putExtra(MainActivity.EXTRA_ASK_MIC, true))
         }
         finish()
         overridePendingTransition(0, 0)
+    }
+
+    companion object {
+        const val EXTRA_START_ONLY = "start_only"
     }
 }

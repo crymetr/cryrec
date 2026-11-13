@@ -44,6 +44,10 @@ class Prefs(context: Context) {
     var mic: String
         get() = sp.getString("mic", "phone")!!
         set(v) = sp.edit().putString("mic", v).apply()
+    /** Listen mode turns itself off after this many hours. */
+    var listenHours: Int
+        get() = sp.getInt("listen_hours", 3)
+        set(v) = sp.edit().putInt("listen_hours", v).apply()
     /** Recording gain in dB (0 = as the mic gives it). */
     var gainDb: Int
         get() = sp.getInt("gain_db", 0)

@@ -73,6 +73,10 @@
             android:name=".RecorderService"
             android:exported="false"
             android:foregroundServiceType="microphone|dataSync" />
+        <service
+            android:name=".ListenService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
 
         <service
             android:name=".DictateIme"
