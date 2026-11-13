@@ -638,3 +638,68 @@ class PromisesWindow:
             self.status.set(f"Can't change the notes: {e}")
             return
         self.load()
+
+
+class TextWindow:
+    """Shows text an AI is writing (in a thread), then lets the user copy it. Optionally saves it to a file."""
+
+    def __init__(self, app, title, work, save_to=None, note="An AI wrote this. Check it before you send it."):
+        self.app, self.save_to = app, save_to
+        theme, px = app.theme, app.theme.px
+        w = self.win = tk.Toplevel(app.root)
+        w.title(f"{title} · CryRec")
+        theme.register(w)
+        w.columnconfigure(0, weight=1)
+        w.rowconfigure(0, weight=1)
+        f = ttk.Frame(w, padding=px(12))
+        f.grid(sticky="nsew")
+        f.columnconfigure(0, weight=1)
+        f.rowconfigure(0, weight=1)
+        self.box = _TextBox(f, theme, row=0, height=22, width=84)
+        self.text = self.box.text
+        self.text.config(cursor="xterm")
+        bar = ttk.Frame(f)
+        bar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(px(8), 0))
+        bar.columnconfigure(0, weight=1)
+        self.status = tk.StringVar(value="Writing...")
+        ttk.Label(bar, textvariable=self.status, style="Muted.TLabel").grid(row=0, column=0, sticky="w")
+        self.copy_btn = ttk.Button(bar, text="Copy", style="Accent.TButton", command=self.copy, state="disabled")
+        self.copy_btn.grid(row=0, column=1)
+        w.geometry(f"{px(700)}x{px(560)}")
+        self.out, self.note = None, note
+
+        def run():  # worker thread: no Tk calls
+            try:
+                out = work() or ""
+                if out and self.save_to:
+                    try:
+                        Path(self.save_to).parent.mkdir(parents=True, exist_ok=True)
+                        Path(self.save_to).write_text(out + "\n", encoding="utf-8")
+                    except OSError:
+                        pass
+                self.out = out
+            except Exception as e:
+                self.out = e
+        threading.Thread(target=run, daemon=True).start()
+        self._poll()
+
+    def _poll(self):
+        if not self.win.winfo_exists():
+            return
+        if self.out is None:
+            self.win.after(300, self._poll)
+            return
+        if isinstance(self.out, Exception):
+            self.status.set(f"Failed: {self.out}")
+            return
+        self.text.config(state="normal")
+        self.text.insert("1.0", self.out or "Nothing to write from.")
+        self.text.config(state="disabled")
+        self.status.set(self.note if self.out else "")
+        if self.out:
+            self.copy_btn.state(["!disabled"])
+
+    def copy(self):
+        self.win.clipboard_clear()
+        self.win.clipboard_append(self.out)
+        self.status.set("Copied.")

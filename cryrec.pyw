@@ -49,7 +49,7 @@ import transcribe as tr
 import viewer
 
 APP = "CryRec"
-VERSION = "0.23.0"
+VERSION = "0.24.0"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -554,6 +554,38 @@ def run_handwriting(cfg, session_dir, images, progress, cancel):
     return "\n".join(added)
 
 
+RETENTION_LOG = CONFIG_DIR / "retention.log"
+
+
+def recycle(files):
+    """Move files to the Recycle Bin (so a wrong setting can be undone) and log them. Returns how many went."""
+    import ctypes
+    from ctypes import wintypes
+
+    class SHFILEOPSTRUCTW(ctypes.Structure):
+        _fields_ = [("hwnd", wintypes.HWND), ("wFunc", wintypes.UINT), ("pFrom", wintypes.LPCWSTR),
+                    ("pTo", wintypes.LPCWSTR), ("fFlags", ctypes.c_ushort), ("fAnyOperationsAborted", wintypes.BOOL),
+                    ("hNameMappings", ctypes.c_void_p), ("lpszProgressTitle", wintypes.LPCWSTR)]
+    done = []
+    for f in files:
+        # only local disks have a Recycle Bin; anywhere else Windows would delete for good, so leave those files
+        if ctypes.windll.kernel32.GetDriveTypeW(str(Path(f).resolve().anchor)) != 3:  # DRIVE_FIXED
+            continue
+        # FO_DELETE with FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI: to the bin, no dialogs.
+        op = SHFILEOPSTRUCTW(None, 3, str(f) + "\0", None, 0x0040 | 0x0010 | 0x0004 | 0x0400, False, None, None)
+        if ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op)) == 0 and not op.fAnyOperationsAborted \
+                and not Path(f).exists():
+            done.append(f)
+    if done:
+        try:
+            with open(RETENTION_LOG, "a", encoding="utf-8") as log:
+                for f in done:
+                    log.write(f"{datetime.now():%Y-%m-%d %H:%M} recycled {f}\n")
+        except OSError:
+            pass
+    return len(done)
+
+
 def with_bookmarks(session_dir, transcript):
     """Moments flagged during the call go after the transcript, so the notes cover them."""
     marks = sorted(archive.load_bookmarks(session_dir), key=lambda b: b["t"])
@@ -1014,6 +1046,10 @@ class SettingsDialog:
         self.upd_btn = ttk.Button(g, text="Check now", command=self._check_updates)
         self.upd_btn.grid(row=row, column=2, sticky="e")
         self.auto_upd = self._check(g, "general", "Check GitHub for updates automatically", cfg.get("auto_update", True))
+        self.audio_days = self._entry(g, "general", "Delete audio after (days)", str(cfg.get("audio_days", 0)))
+        self._audio_days_before = cfg.get("audio_days", 0)
+        self._hint(g, "general", "0 = keep everything. Otherwise the audio of recordings older than this is deleted\n"
+                                 "once they have a transcript. Transcripts, notes and scans always stay.")
 
         # ---- Transcript
         t = tabs["transcript"]
@@ -1263,7 +1299,16 @@ class SettingsDialog:
             ollama_model=self.o_model.get().strip(), watch_calls=self.watch.get(), meeting_names=self.meet_names.get(),
             silence_minutes=_int(self.silence.get(), 5, 0, 60), dictation_enabled=self.dict_on.get(),
             dictation_hotkey=self._key(self.dict_key), dictation_polish=self._key(self.polish),
-            polish_model=self.polish_model.get().strip(), auto_update=self.auto_upd.get())
+            polish_model=self.polish_model.get().strip(), auto_update=self.auto_upd.get(),
+            audio_days=_int(self.audio_days.get(), 0, 0, 3650))
+        days = self.cfg.get("audio_days", 0)
+        if days and days != self._audio_days_before:  # turning it on (or changing it) is confirmed with numbers
+            app = getattr(self.win.master, "cryrec_app", None)
+            n = len(recall.old_audio(app.all_folders(), days)) if app else 0
+            if not messagebox.askyesno(APP, f"Delete audio after {days} days:\n\n{n} audio files of older recordings "
+                                            "go to the Recycle Bin within a few minutes, and from then on every day.\n"
+                                            "Transcripts, notes and scans stay.\n\nTurn this on?", parent=self.win):
+                self.cfg["audio_days"] = self._audio_days_before
         if self.autostart.get() != autostart_enabled():
             set_autostart(self.autostart.get())
         secret_set(self.cfg, "server_key", self.s_key.get().strip())
@@ -1426,6 +1471,7 @@ class App:
         root.protocol("WM_DELETE_WINDOW", self.hide_or_quit)
         root.after(2000, self._poll_calls)
         root.after(20_000, self._poll_meeting_start)
+        root.after(120_000, self._retention)
         root.after(1000, self._poll_show_flag)
         root.after(3000, self._poll_recent)
         self.dictation = DictationUI(self)
@@ -1616,6 +1662,69 @@ class App:
             return None
         return llm_for(cfg) if self._notes_ready(cfg) else None
 
+    def _notes_language(self):
+        return sm.NOTES_LANGUAGES.get(self.cfg.get("notes_language", "English")) or "the language of the meeting"
+
+    def draft(self, d, kind):
+        """A follow-up mail, escalation summary or handover note from one recording (notes engine)."""
+        llm = self.ask_llm()
+        if llm:
+            lang = self._notes_language()
+            viewer.TextWindow(self, recall.DRAFTS[kind][0], lambda: recall.draft(kind, d, llm, lang),
+                              save_to=Path(d) / "drafts" / f"{kind}.md")
+
+    def add_draft_items(self, m, d):
+        sub = tk.Menu(m, tearoff=False)
+        for kind, (label, _) in recall.DRAFTS.items():
+            sub.add_command(label=label, command=lambda k=kind: self.draft(d, k))
+        m.add_cascade(label="Draft", menu=sub,
+                      state="normal" if (Path(d) / "transcript.txt").exists() else "disabled")
+
+    def week_digest(self):
+        llm = self.ask_llm()
+        if not llm:
+            return
+        me, lang, folders = self.cfg.get("my_name") or "Me", self._notes_language(), self.all_folders()
+
+        def work():
+            text, n = recall.digest(folders, llm, me, lang)
+            return text or "No meeting notes from the last 7 days."
+        viewer.TextWindow(self, "Last 7 days", work)
+
+    def catch_up(self):
+        """While recording: what was said in the last finished stretch of the live transcript."""
+        if not (self.recording and self.session_dir):
+            return
+        text, upto = recall.live_text(self.session_dir)
+        if not text:
+            messagebox.showinfo(APP, "Nothing to catch up on yet. The live transcript is made in 5-minute parts, "
+                                     "and only with a server, an online API or a GPU.", parent=self.root)
+            return
+        llm = self.ask_llm()
+        if llm:
+            me, lang, d = self.cfg.get("my_name") or "Me", self._notes_language(), self.session_dir
+            viewer.TextWindow(self, f"Catch up (to {tr.fmt_ts(upto)})",
+                              lambda: recall.catch_up(d, llm, me, lang)[0], note="An AI wrote this from the live transcript.")
+
+    def _retention(self):
+        """Once a day: move the audio of old recordings to the Recycle Bin when the user turned that on."""
+        days = _int(str(self.cfg.get("audio_days", 0)), 0, 0, 3650)
+        if days and (self.recording or self.t_busy):
+            self.root.after(3600 * 1000, self._retention)  # busy now: try again in an hour
+            return
+        self.root.after(24 * 3600 * 1000, self._retention)
+        if not days:
+            return
+        files = recall.old_audio(self.all_folders(), days)
+
+        def work():
+            n = recycle(files)
+            if n:
+                self.root.after(0, lambda: self.set_status(f"Moved the audio of old recordings to the Recycle Bin "
+                                                           f"({n} files, older than {days} days)."))
+        if files:
+            threading.Thread(target=work, daemon=True).start()
+
     def open_promises(self):
         viewer.PromisesWindow(self, self.all_folders)
 
@@ -1632,6 +1741,7 @@ class App:
                   countdown_text="This closes in {s} s")
 
     def add_action_items(self, m, d):
+        self.add_draft_items(m, d)
         m.add_command(label="Copy for AI chat", command=lambda: self.copy_ai_prompt(d))
         for name, cmd in load_actions():
             m.add_command(label=name, command=lambda c=cmd: self.run_action(c, d))
@@ -1688,6 +1798,9 @@ class App:
         m = tk.Menu(self.root, tearoff=False)
         m.add_command(label="Search and ask...", command=self.open_search)
         m.add_command(label="Open promises...", command=self.open_promises)
+        m.add_command(label="Last 7 days...", command=self.week_digest)
+        if self.recording:
+            m.add_command(label="Catch me up", command=self.catch_up)
         if self.recording:
             m.add_command(label="Mark this moment  (Win+Alt+M)", command=self.mark_moment)
         m.add_separator()
@@ -1837,6 +1950,8 @@ class App:
             pystray.MenuItem(lambda item: "Stop recording" if self.recording else "Start recording",
                              on_ui(self.toggle)),
             pystray.MenuItem("Mark this moment", on_ui(self.mark_moment), visible=lambda item: self.recording),
+            pystray.MenuItem("Catch me up", on_ui(lambda: (self.show(), self.catch_up())),
+                             visible=lambda item: self.recording),
             pystray.MenuItem("Search recordings", on_ui(lambda: (self.show(), self.open_search()))),
             pystray.MenuItem("Copy last dictation", on_ui(self.copy_last_dictation)),
             pystray.MenuItem("Quit", on_ui(self.quit)))

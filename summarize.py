@@ -39,7 +39,7 @@ When the other side was told apart, lines carry a person's name or "Speaker 1", 
 The transcript comes from speech recognition, so expect some misheard words. Do not invent facts, numbers, owners or dates that are not in the transcript.
 {_glossary_line(glossary)}{lang} Use short sentences and everyday words.
 
-Answer with Markdown only, using exactly these sections:
+Answer with Markdown only, using exactly these sections (keep the four section headings in English, exactly as written here, whatever language the notes are in):
 
 ## Summary
 3 to 6 bullet points: what the meeting was about and what came out of it.

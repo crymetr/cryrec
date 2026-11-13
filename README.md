@@ -103,6 +103,15 @@ Set **Your name** in Settings so action items say your name instead of "Me". Not
 - **Last time**: when you press Record and the meeting is known (Outlook or Teams), CryRec looks for the previous recording with the same title, or mostly the same people, and shows what was left open then: unticked action items and open questions.
 - **Tags**: ticket-like codes (`ABC-12345`), model-like codes (`EB-X49`) and names in capitals said three times or more are picked up per recording and shown in search results.
 
+## Drafts, digest, catch-up, old audio
+
+All of these use the notes engine you picked (a local one keeps everything on your machines) and write from the notes and transcript only; what was not said comes out as "not said". Read them before you send them.
+
+- **Draft** (a recording's ⋯ menu, also in the viewer): **Follow-up email**, **Escalation summary** (symptom, product and versions, environment, what was tried, result, what is missing, next step and owner) or **Handover note**. The text opens in a window with Copy and is kept in the recording's `drafts\` folder.
+- **Last 7 days** (⋯ menu): one digest of the week's meeting notes: decisions, your action items, others' action items, still open.
+- **Catch me up** (⋯ or tray menu while recording): a few bullets on the last finished stretch of the live transcript, for when you stepped away. The live transcript is cut in 5-minute parts, so it can be up to 5 minutes behind, and it only exists with a server, an online API or a GPU.
+- **Delete audio after (days)** (Settings > General, 0 = never, the default): once a day, the audio of recordings older than this goes to the Recycle Bin, but only for recordings that have a real transcript (an empty or failed one does not count) and only on local disks. Turning it on shows how many files it will move and asks first; what it moved is listed in `retention.log` next to your settings. Transcripts, notes, scans and drafts stay.
+
 ## Who said what
 
 After the transcript, CryRec tells the people on the other side apart: "Them" becomes **Speaker 1**, **Speaker 2**... (most talk first). It runs on your PC's CPU with a small voice model (about 2 s per minute of speech) and uses the transcript's own lines, so it needs no extra setup. In **View**, "Who is who?" lists each speaker with a ▶ sample: type or pick a name (the meeting's attendees and voices you named before are offered) and **Save names**. The transcript, its .srt and the search index switch to the names; you can rewrite the notes so action items get the right owners. Give two speakers the same name when one person was split in two.
@@ -261,5 +270,6 @@ powershell -File packaging\build.ps1
 - v0.20: Android listen mode: notices a conversation and asks whether to record it
 - v0.21: calls in the browser and Outlook meetings starting now (desktop), calendar meeting reminders (Android)
 - v0.22: handwritten notes: scan or pick photos, read by a local vision model, used in the notes
-- v0.23: ask your recordings (answers with sources), open promises across meetings, "last time" brief, tags (this)
+- v0.23: ask your recordings (answers with sources), open promises across meetings, "last time" brief, tags
+- v0.24: drafts (follow-up email, escalation summary, handover), weekly digest, catch me up, delete old audio (this)
 - next: smarter answers over the archive, handwritten notes, better meeting detection
