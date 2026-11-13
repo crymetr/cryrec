@@ -39,6 +39,7 @@ import archive
 import callwatch
 from ui_theme import (THEME_MODES, LevelMeter, PillButton, Theme, Tooltip, enable_dpi_awareness,
                       work_area)
+import diarize as dz
 import dictate
 import live as lv
 import meetinginfo as mi
@@ -47,7 +48,7 @@ import transcribe as tr
 import viewer
 
 APP = "CryRec"
-VERSION = "0.17.0"
+VERSION = "0.18.0"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -56,6 +57,7 @@ CONFIG_DIR = APP_DIR if PORTABLE else Path(os.environ.get("APPDATA", Path.home()
 CONFIG_FILE = CONFIG_DIR / "cryrec.json"
 VOCAB_FILE = CONFIG_DIR / "vocabulary.txt"
 ACTIONS_FILE = CONFIG_DIR / "actions.txt"
+VOICES_FILE = CONFIG_DIR / "voices.json"
 INDEX_FILE = (APP_DIR if PORTABLE else Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP) / "index.db"
 VOCAB_TEMPLATE = """# CryRec vocabulary: helps the transcript spell your names and terms right.
 # One term per line, e.g.:   Power BI
@@ -466,6 +468,14 @@ def run_notes(cfg, session_dir, progress, cancel):
         }[engine]()
         md = backend.notes(transcript, my_name, language, progress, cancel, glossary)
     return sm.write_notes(session_dir, md, mi.load(session_dir))
+
+
+def run_speakers(session_dir, progress, cancel):
+    """Speaker 1..N instead of "Them" (local CPU; voiceprints stay on this PC). Returns how many."""
+    try:
+        return dz.run_session(session_dir, MODELS_DIR, VOICES_FILE, tr, progress, cancel)
+    except dz.Cancelled:
+        raise tr.Cancelled()
 
 
 def with_bookmarks(session_dir, transcript):
@@ -938,6 +948,10 @@ class SettingsDialog:
                                     cfg.get("language", "Auto"))
         self.auto = self._check(t, "transcript", "Transcribe right after each recording",
                                 cfg.get("auto_transcribe", True))
+        self.speakers = self._check(t, "transcript", "Tell the other speakers apart (Speaker 1, 2...)",
+                                    cfg.get("speakers", True))
+        self._hint(t, "transcript", "Runs on this PC (27 MB model, downloaded once). Name them in View;\n"
+                                    "voices you name are remembered on this PC only.")
         # engine-specific groups
         self.groups = {}
         start = self._next("transcript")
@@ -1162,7 +1176,7 @@ class SettingsDialog:
             return
         self.cfg.update(
             out_dir=self.out_dir.get().strip(), theme=self._key(self.theme_var),
-            engine=engine, language=self._key(self.language), auto_transcribe=self.auto.get(),
+            engine=engine, language=self._key(self.language), auto_transcribe=self.auto.get(), speakers=self.speakers.get(),
             model=self._key(self.model), use_gpu=self.gpu.get(), server_url=url,
             api_url=self.a_url.get().strip(), api_model=self.a_model.get().strip(),
             clean_engine=self._key(self.clean), notes_engine=self._key(self.notes_engine),
@@ -1366,7 +1380,8 @@ class App:
             return "Saving audio...", "busy", None
         if job and job.get("stage"):
             pct = f" {job['progress'] * 100:.0f}%" if job.get("progress") else ""
-            return {"transcript": "Transcribing", "clean": "Cleaning up", "notes": "Writing notes",
+            return {"transcript": "Transcribing", "speakers": "Telling speakers apart", "clean": "Cleaning up",
+                    "notes": "Writing notes",
                     "queued": "Waiting"}.get(job["stage"], job["stage"]) + pct, "busy", None
         has_t, has_n = (d / "transcript.txt").exists(), (d / "notes.md").exists()
         errors = (job or {}).get("errors", {})
@@ -1438,6 +1453,8 @@ class App:
                                            command=lambda k=key: self.enqueue_notes(d, engine=k))
             m.add_cascade(label="Write notes with", menu=notes_menu,
                           state="normal" if (d / "transcript.txt").exists() else "disabled")
+            m.add_command(label="Tell speakers apart", command=lambda: self.enqueue_speakers(d),
+                          state="normal" if (d / "transcript.srt").exists() else "disabled")
         m.add_separator()
         m.add_command(label="View transcript", command=lambda: self.open_viewer(d),
                       state="normal" if (d / "transcript.txt").exists() or viewer.find_audio(d) else "disabled")
@@ -1463,6 +1480,35 @@ class App:
         if getattr(self, "archive", None) is None:
             self.archive = archive.Archive(INDEX_FILE)
         viewer.SearchWindow(self, self.archive, self.all_folders)
+
+    def speaker_choices(self, d):
+        """Names to offer: this meeting's attendees, then voices saved earlier."""
+        names = list((mi.load(d) or {}).get("attendees") or [])
+        names += [n for n in dz.load_voices(VOICES_FILE) if n not in names]
+        return names
+
+    def save_speaker_names(self, d, names, parent=None):
+        if (self.jobs.get(str(d)) or {}).get("stage"):
+            messagebox.showinfo(APP, "This recording is still being processed. Save the names when it is done.",
+                                parent=parent or self.root)
+            return False
+        try:
+            renames = dz.apply_names(d, names, VOICES_FILE)
+        except OSError as e:
+            messagebox.showerror(APP, f"Can't save the names:\n{e}", parent=parent or self.root)
+            return False
+        if renames and (d / "notes.md").exists() and self.cfg.get("notes_engine", "off") != "off" and \
+                messagebox.askyesno(APP, "Names saved. Rewrite the notes with these names?", parent=parent):
+            self.enqueue_notes(d)
+        else:
+            self.set_status("Names saved.")
+        return True
+
+    def enqueue_speakers(self, d):
+        if not (d / "transcript.srt").exists():
+            messagebox.showwarning(APP, "This folder has no transcript yet. Transcribe it first.")
+            return
+        self._queue(d, self._transcript_settings(), "speakers")
 
     def add_action_items(self, m, d):
         m.add_command(label="Copy for AI chat", command=lambda: self.copy_ai_prompt(d))
@@ -1800,7 +1846,7 @@ class App:
             self.running = key
             self.t_cancel.clear()
             errors = {}
-            self._t_ui(busy=True, job=(key, {"stage": "transcript" if mode == "all" else "notes", "progress": 0,
+            self._t_ui(busy=True, job=(key, {"stage": {"all": "transcript"}.get(mode, mode), "progress": 0,
                                              "errors": {}}))
 
             def stage(name, key=key):
@@ -1813,6 +1859,14 @@ class App:
                 if mode == "all":
                     self._transcript(cfg, session_dir, progress)
                     msg = "Transcript saved."
+                    if cfg.get("speakers", True):
+                        stage("speakers")
+                        try:
+                            run_speakers(session_dir, progress, self.t_cancel.is_set)
+                        except (tr.Cancelled, sm.Cancelled):
+                            raise
+                        except Exception as e:
+                            errors["speakers"] = str(e)
                     if cfg.get("clean_engine", "off") != "off":
                         stage("clean")
                         try:
@@ -1823,7 +1877,10 @@ class App:
                             raise
                         except Exception as e:
                             errors["cleanup"] = str(e)
-                if cfg.get("notes_engine", "off") != "off":
+                if mode == "speakers":
+                    n = run_speakers(session_dir, progress, self.t_cancel.is_set)
+                    msg = f"{n} speakers found. Name them in View." if n else "Nothing to tell apart."
+                elif cfg.get("notes_engine", "off") != "off":
                     stage("notes")
                     try:
                         run_notes(cfg, session_dir, progress, self.t_cancel.is_set)
@@ -2227,10 +2284,24 @@ def main():
         out = Path(sys.argv[2]) / "transcript.log"
         try:
             res = f"OK {run_transcript(cfg, Path(sys.argv[2]), lambda f, t: None, lambda: False, {}, threading.Lock())}"
+            if cfg.get("speakers", True):
+                try:  # optional stage: a failure here must not skip cleanup and notes
+                    res += f"\nOK {run_speakers(Path(sys.argv[2]), lambda f, t: None, lambda: False)} speakers"
+                except Exception as e:
+                    res += f"\nFAIL speakers {e!r}"
             if cfg.get("clean_engine", "off") != "off":
                 res += f"\nOK cleaned, {run_clean(cfg, Path(sys.argv[2]), lambda f, t: None, lambda: False)} lines left as heard"
             if cfg.get("notes_engine", "off") != "off":
                 res += f"\nOK {run_notes(cfg, Path(sys.argv[2]), lambda f, t: None, lambda: False)}"
+        except Exception as e:
+            res = f"FAIL {e!r}"
+        out.write_text(res, encoding="utf-8")
+        return
+    if len(sys.argv) > 2 and sys.argv[1] == "--speakers":
+        # headless: tell the speakers apart in a folder that already has a transcript
+        out = Path(sys.argv[2]) / "speakers.log"
+        try:
+            res = f"OK {run_speakers(Path(sys.argv[2]), lambda f, t: None, lambda: False)} speakers"
         except Exception as e:
             res = f"FAIL {e!r}"
         out.write_text(res, encoding="utf-8")

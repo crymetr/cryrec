@@ -34,6 +34,7 @@ def _system(my_name, language, glossary=()):
 
 The transcript has lines like "[hh:mm:ss] Me: ..." and "[hh:mm:ss] Them: ...". {me}
 "Them" is everyone on the other side of the call; it can be several people. Use real names only when the transcript says them; otherwise write "Them".
+When the other side was told apart, lines carry a person's name or "Speaker 1", "Speaker 2"... instead of "Them": each label is one person all the way through, so use those names for owners.
 The transcript comes from speech recognition, so expect some misheard words. Do not invent facts, numbers, owners or dates that are not in the transcript.
 {_glossary_line(glossary)}{lang} Use short sentences and everyday words.
 

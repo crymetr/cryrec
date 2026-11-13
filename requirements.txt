@@ -13,6 +13,8 @@ pystray>=0.19
 sv-ttk>=2.6
 # meeting title + attendees from classic Outlook (COM)
 pywin32
+# speaker separation (speaker embeddings on CPU)
+sherpa-onnx>=2.0,<3
 # build only
 pyinstaller
 pillow

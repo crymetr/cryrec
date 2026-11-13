@@ -10,9 +10,10 @@ import av
 import numpy as np
 
 import archive
+import diarize as dz
 
 RATE = 48000
-AUDIO_NAMES = ("meeting.mp3", "meeting.m4a")
+AUDIO_NAMES = ("meeting.mp3", "meeting.m4a", "them.flac", "them.wav")  # split track if the mix is gone
 PRE_ROLL = 2.0  # start a little before the line, so the first word is not cut
 
 
@@ -212,6 +213,8 @@ class ViewerWindow:
         self.text = self.box.text
         self.status = tk.StringVar()
         ttk.Label(f, textvariable=self.status, style="Muted.TLabel").grid(row=2, column=0, sticky="w", pady=(px(6), 0))
+        self.spk_frame = ttk.Frame(f)
+        self.spk_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(px(8), 0))
 
         self.lines = []  # (seconds, text index of line start)
         self.load()
@@ -228,6 +231,7 @@ class ViewerWindow:
             self.status.set("No audio in this folder (only the text).")
         if not self.player:
             self.play_btn.state(["disabled"])
+        self.build_speakers()
         w.protocol("WM_DELETE_WINDOW", self.close)
         w.bind("<space>", lambda e: (self.toggle(), "break")[1])
         w.bind("<Control-f>", lambda e: find.focus_set())
@@ -264,6 +268,42 @@ class ViewerWindow:
             self.lines.append((sec, start))
         t.config(state="disabled")
         self.status.set(f"{len(rows)} lines · click a line to play from there · Space = play/pause")
+
+    def build_speakers(self):
+        """'Who is Speaker 2?' row per speaker: play a sample, type or pick a name, Save names."""
+        for w in self.spk_frame.winfo_children():
+            w.destroy()
+        data = dz.load_speakers(self.folder)
+        if not data or not data.get("speakers"):
+            return
+        px = self.app.theme.px
+        ttk.Label(self.spk_frame, text="Who is who?", style="Strong.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(self.spk_frame, text="Play a sample, then type or pick a name. Same name twice = same person.",
+                  style="Muted.TLabel").grid(row=0, column=1, columnspan=3, sticky="w", padx=px(8))
+        choices = self.app.speaker_choices(self.folder)
+        self.name_vars = {}
+        for r, (label, info) in enumerate(data["speakers"].items(), start=1):
+            ttk.Label(self.spk_frame, text=f"{label}  ·  {fmt(info['seconds'])}").grid(
+                row=r, column=0, sticky="w", pady=px(2))
+            ttk.Button(self.spk_frame, text="▶", width=3, command=lambda s=info["sample"]: self.goto(s + 2, play=True),
+                       state="normal" if self.player else "disabled").grid(row=r, column=1, padx=px(6))
+            var = tk.StringVar(value=info.get("name") or info.get("suggest") or "")
+            box = ttk.Combobox(self.spk_frame, textvariable=var, values=choices, width=24)
+            box.grid(row=r, column=2, sticky="w")
+            hint = ("" if info.get("name") else
+                    f"suggested from a saved voice ({info['score']:.2f})" if info.get("suggest") else "")
+            ttk.Label(self.spk_frame, text=hint, style="Muted.TLabel").grid(row=r, column=3, sticky="w", padx=px(8))
+            self.name_vars[label] = var
+        ttk.Button(self.spk_frame, text="Save names", style="Accent.TButton", command=self.save_names).grid(
+            row=len(data["speakers"]) + 1, column=2, sticky="w", pady=(px(6), 0))
+
+    def save_names(self):
+        names = {label: v.get() for label, v in self.name_vars.items()}
+        if self.app.save_speaker_names(self.folder, names, parent=self.win):
+            pos = self.text.yview()[0]
+            self.load()
+            self.text.yview_moveto(pos)
+            self.build_speakers()
 
     def goto(self, sec, play=False):
         if self.player:

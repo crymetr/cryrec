@@ -94,6 +94,14 @@ Set **Your name** in Settings so action items say your name instead of "Me". Not
 - **⋯ > Search recordings** searches every transcript, notes file and bookmark at once. Every word must appear; prefix match, Turkish letters match without their dots and cedillas. Click a hit to open that moment. The index is a small SQLite file in `%LOCALAPPDATA%\CryRec` (portable: next to the exe), rebuilt for a folder when its files change; you can delete it any time.
 - **Win+Alt+M** while recording (or tray > Mark this moment) drops a bookmark. Bookmarks show at the top of the viewer, are searchable, and the notes engine is told to cover what was said around them.
 
+## Who said what
+
+After the transcript, CryRec tells the people on the other side apart: "Them" becomes **Speaker 1**, **Speaker 2**... (most talk first). It runs on your PC's CPU with a small voice model (about 2 s per minute of speech) and uses the transcript's own lines, so it needs no extra setup. In **View**, "Who is who?" lists each speaker with a ▶ sample: type or pick a name (the meeting's attendees and voices you named before are offered) and **Save names**. The transcript, its .srt and the search index switch to the names; you can rewrite the notes so action items get the right owners. Give two speakers the same name when one person was split in two.
+
+Named voices are remembered on this PC; next time a matching voice is suggested (never applied without you). Recordings made before this version: ⋯ > **Tell speakers apart**. Turn it off under Settings > Transcript. `CryRec.exe --speakers <folder>` runs it headless.
+
+Measured on a public 4-person meeting squeezed to Teams-like 24 kbps audio: 94% of the transcribed speech got the right speaker. Short interjections and people talking over each other are the usual mistakes.
+
 ## Actions
 
 A recording's ⋯ menu and the viewer have **Copy for AI chat** (a ready prompt with the meeting's file paths, to paste into any AI chat or coding agent) and your own **actions**. **⋯ > Edit actions...** opens `actions.txt`; one action per line, `Name | command`, with `{folder}`, `{transcript}`, `{notes}` and `{title}` filled in. Commands run directly (no shell), with the recording folder as the working directory. For example, to open a terminal AI session about a meeting:
@@ -163,6 +171,7 @@ Each recording gets its own folder under the save location (installed: `Document
 - `transcript.raw.txt`: the transcript before Clean up, when Clean up is on
 - `notes.md`: meeting notes, when a notes engine is picked
 - `bookmarks.json`: moments marked with Win+Alt+M
+- `speakers.json`: the speakers found, their names and a voice summary (numbers, not audio)
 
 ## Privacy
 
@@ -177,6 +186,7 @@ Two connections happen without such a setting:
 
 - **Update check**: the desktop app asks GitHub (`api.github.com`) for the newest release on start and every hour; the Android app every 12 hours. Nothing about you or your recordings is sent. Turn it off under Settings > General (desktop) or Settings > Updates (Android) > "Check GitHub for updates automatically". "Check now" still works.
 - **Speech model download**: the first time you transcribe with **This PC**, the model is downloaded from Hugging Face (`huggingface.co`). No audio is sent.
+- **Speaker model download**: the first time speakers are told apart, a 27 MB voice model is downloaded from GitHub (`github.com`). Telling speakers apart runs on your PC; the voices you name are kept in `voices.json` next to your settings and never sent anywhere.
 
 The installer shows this notice before it installs.
 
@@ -226,5 +236,6 @@ powershell -File packaging\build.ps1
 - v0.14: Android record widget and "Send to my PC" share
 - v0.15: recordings named after the meeting (Outlook calendar or Teams), attendee names in the transcript and notes
 - v0.16: Android level meter (dBFS), gain boost with limiter, mic choice, play back recordings
-- v0.17: transcript viewer with player (click a line to hear it), search across all recordings, bookmarks, actions (this)
-- next: who said what (speaker separation and names), smarter answers over the archive, handwritten notes, better meeting detection
+- v0.17: transcript viewer with player (click a line to hear it), search across all recordings, bookmarks, actions
+- v0.18: who said what: Speaker 1, 2... on the other side, name them once, voices remembered (this)
+- next: smarter answers over the archive, handwritten notes, better meeting detection
