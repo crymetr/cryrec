@@ -373,3 +373,9 @@ def remote_ocr(url, key, image, progress, cancel, vocabulary=""):
     import base64
     return _remote_job(url, key, "/ocr", {"image_b64": base64.b64encode(image).decode(), "vocabulary": vocabulary},
                        "txt", progress, cancel)
+
+
+def remote_ask(url, key, system, user, backend, cancel=lambda: False):
+    """One prompt through a CryRec server's local model ("local") or its cloud key ("claude")."""
+    return _remote_job(url, key, "/ask", {"system": system, "user": user, "backend": backend}, "txt",
+                       lambda f, t: None, cancel)

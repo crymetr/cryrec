@@ -93,8 +93,15 @@ Set **Your name** in Settings so action items say your name instead of "Me". Not
 ## Viewer, search and bookmarks
 
 - **View** on a recording opens the transcript with a player: click any line and the audio plays from there (Space = play/pause, Find highlights words in this recording).
-- **⋯ > Search recordings** searches every transcript, notes file and bookmark at once. Every word must appear; prefix match, Turkish letters match without their dots and cedillas. Click a hit to open that moment. The index is a small SQLite file in `%LOCALAPPDATA%\CryRec` (portable: next to the exe), rebuilt for a folder when its files change; you can delete it any time.
+- **⋯ > Search and ask** searches every transcript, notes file and bookmark at once. Every word must appear; prefix match, Turkish letters match without their dots and cedillas. Click a hit to open that moment. The index is a small SQLite file in `%LOCALAPPDATA%\CryRec` (portable: next to the exe), rebuilt for a folder when its files change; you can delete it any time.
 - **Win+Alt+M** while recording (or tray > Mark this moment) drops a bookmark. Bookmarks show at the top of the viewer, are searchable, and the notes engine is told to cover what was said around them.
+
+## Ask, promises and "last time"
+
+- **Ask** (in ⋯ > Search and ask): type a question in your own words ("why did we rename the portal?") and press Ask. CryRec asks the notes engine for search words (in English and Turkish, so the question's language doesn't have to match the meeting's), finds the best passages in your transcripts and notes, and has the engine answer from those passages only. Every statement carries a number like [3]; click it to open that moment and listen. If the recordings don't say, the answer says so. It uses the notes engine you picked in Settings, so with "My server (local AI)" or Ollama nothing leaves your machines; with a cloud engine, the passages it found are sent there. It is a keyword search underneath: it finds what was said in words close to yours, not ideas phrased completely differently.
+- **Open promises** (⋯ menu): the action items of every meeting's notes in one list, by person, yours first. Click the box to tick an item (it is ticked in that meeting's `notes.md`), click the meeting to open it.
+- **Last time**: when you press Record and the meeting is known (Outlook or Teams), CryRec looks for the previous recording with the same title, or mostly the same people, and shows what was left open then: unticked action items and open questions.
+- **Tags**: ticket-like codes (`ABC-12345`), model-like codes (`EB-X49`) and names in capitals said three times or more are picked up per recording and shown in search results.
 
 ## Who said what
 
@@ -253,5 +260,6 @@ powershell -File packaging\build.ps1
 - v0.19: who said what on the phone too (split on your server, named in the app)
 - v0.20: Android listen mode: notices a conversation and asks whether to record it
 - v0.21: calls in the browser and Outlook meetings starting now (desktop), calendar meeting reminders (Android)
-- v0.22: handwritten notes: scan or pick photos, read by a local vision model, used in the notes (this)
+- v0.22: handwritten notes: scan or pick photos, read by a local vision model, used in the notes
+- v0.23: ask your recordings (answers with sources), open promises across meetings, "last time" brief, tags (this)
 - next: smarter answers over the archive, handwritten notes, better meeting detection

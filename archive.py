@@ -12,10 +12,10 @@ import unicodedata
 from pathlib import Path
 
 LINE = re.compile(r"^\[(\d{2}):(\d{2}):(\d{2})\] ([^:]{1,40}): (.*)$")
-INDEX_VERSION = 1
-FILES = ("transcript.txt", "notes.md", "bookmarks.json", "meeting.json")
+INDEX_VERSION = 2
+FILES = ("transcript.txt", "notes.md", "bookmarks.json", "meeting.json", "handwritten.md")
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS folders (path TEXT PRIMARY KEY, sig TEXT, title TEXT);
+CREATE TABLE IF NOT EXISTS folders (path TEXT PRIMARY KEY, sig TEXT, title TEXT, tags TEXT);
 CREATE VIRTUAL TABLE IF NOT EXISTS lines USING fts5(
     norm, text UNINDEXED, who UNINDEXED, path UNINDEXED, t UNINDEXED, kind UNINDEXED,
     tokenize = "unicode61 remove_diacritics 2");
@@ -39,7 +39,7 @@ def transcript_lines(path):
     """[(seconds, who, text)] from a transcript.txt ('[hh:mm:ss] Who: text' lines; header lines skipped)."""
     out = []
     try:
-        text = Path(path).read_text(encoding="utf-8")
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return out
     for line in text.splitlines():
@@ -51,7 +51,7 @@ def transcript_lines(path):
 
 def load_bookmarks(folder):
     try:
-        data = json.loads((Path(folder) / "bookmarks.json").read_text(encoding="utf-8"))
+        data = json.loads((Path(folder) / "bookmarks.json").read_text(encoding="utf-8", errors="replace"))
         return [b for b in data if isinstance(b, dict) and "t" in b]
     except (OSError, ValueError):
         return []
@@ -65,7 +65,7 @@ def add_bookmark(folder, t, label="Marked"):
 
 def folder_title(folder):
     try:
-        title = json.loads((Path(folder) / "meeting.json").read_text(encoding="utf-8")).get("title")
+        title = json.loads((Path(folder) / "meeting.json").read_text(encoding="utf-8", errors="replace")).get("title")
     except (OSError, ValueError):
         title = None
     return title or Path(folder).name
@@ -126,7 +126,7 @@ class Archive:
         title = folder_title(f)
         rows = [(text, who, p, t, "line") for t, who, text in transcript_lines(f / "transcript.txt")]
         try:
-            notes = (f / "notes.md").read_text(encoding="utf-8")
+            notes = (f / "notes.md").read_text(encoding="utf-8", errors="replace")
         except OSError:
             notes = ""
         for line in notes.splitlines():
@@ -138,7 +138,37 @@ class Archive:
         rows.append((title, "Title", p, -1, "title"))
         self.db.executemany("INSERT INTO lines (norm, text, who, path, t, kind) VALUES (?, ?, ?, ?, ?, ?)",
                             [(fold(r[0]),) + r for r in rows])
-        self.db.execute("INSERT INTO folders (path, sig, title) VALUES (?, ?, ?)", (p, sig, title))
+        try:
+            hand = (f / "handwritten.md").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            hand = ""
+        more = [(ln.strip().lstrip("#-*> ").strip(), "Handwritten", p, -1, "note") for ln in hand.splitlines()]
+        self.db.executemany("INSERT INTO lines (norm, text, who, path, t, kind) VALUES (?, ?, ?, ?, ?, ?)",
+                            [(fold(r[0]),) + r for r in more if r[0]])
+        import recall  # lazy: recall imports this module
+        self.db.execute("INSERT INTO folders (path, sig, title, tags) VALUES (?, ?, ?, ?)",
+                        (p, sig, title, " ".join(recall.folder_tags(f))))
+
+    def tags(self, path):
+        with self.lock:
+            r = self.db.execute("SELECT tags FROM folders WHERE path = ?", (str(path),)).fetchone()
+        return (r[0] or "").split() if r else []
+
+    def search_any(self, words, limit=60):
+        """Lines matching ANY of the words or phrases, best first (for answering questions)."""
+        terms = []
+        for w in words:
+            toks = [fold(t) for t in re.findall(r"\w[\w.\-/]*", w, re.UNICODE)]
+            if toks:
+                terms.append('"' + " ".join(toks).replace('"', "") + '"' + ("*" if len(toks) == 1 else ""))
+        if not terms:
+            return []
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT l.path, f.title, l.t, l.who, l.kind, l.text FROM lines l JOIN folders f ON f.path = l.path "
+                "WHERE lines MATCH ? AND l.kind != 'title' ORDER BY rank LIMIT ?",
+                (" OR ".join(terms), limit)).fetchall()
+        return [{"path": r[0], "title": r[1], "t": r[2], "who": r[3], "kind": r[4], "text": r[5]} for r in rows]
 
     def search(self, query, limit=200):
         """[{path, title, t, who, kind, text, snippet}] best match first. Every word must match (prefix match).
@@ -153,6 +183,12 @@ class Archive:
                 "WHERE lines MATCH ? ORDER BY rank LIMIT ?", (fts, limit)).fetchall()
         return [{"path": r[0], "title": r[1], "t": r[2], "who": r[3], "kind": r[4], "text": r[5],
                  "snippet": snippet(r[5], words)} for r in rows]
+
+
+def fmt_clock(sec):
+    sec = max(0, int(sec))
+    h, rem = divmod(sec, 3600)
+    return f"{h:02d}:{rem // 60:02d}:{rem % 60:02d}"
 
 
 def _plain(c):

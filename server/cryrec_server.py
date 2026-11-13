@@ -13,6 +13,7 @@ API (all need "Authorization: Bearer <key>"):
     POST   /jobs?language=&name=&speakers=1   body = zip with me.mp3 / them.mp3 (or meeting.mp3 / .m4a) -> {id}
                                speakers=1: the other side / single track is split into Speaker 1..N
     POST   /voices            JSON {name, vec, seconds}: a client named a speaker (suggested next time)
+    POST   /ask               JSON {system, user, backend: local|claude} -> {id}; job result {txt}
     POST   /ocr               JSON {image_b64 (JPEG/PNG), vocabulary} -> {id}; job result {txt} (local vision model)
     POST   /notes             JSON {transcript, backend: local|claude, language, my_name, vocabulary} -> {id}
     POST   /clean             JSON {transcript, vocabulary} -> {id}   (Claude fixes casing/punctuation/terms)
@@ -57,7 +58,7 @@ import diarize as dz  # noqa: E402
 import summarize as sm  # noqa: E402
 import transcribe as tr  # noqa: E402
 
-VERSION = "0.14.0"
+VERSION = "0.15.0"
 APPDATA = Path(os.environ.get("APPDATA", Path.home())) / "CryRec"
 LOCALAPPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "CryRec"
 DEFAULTS = {
@@ -275,6 +276,22 @@ class Jobs:
         log(f"{kind} {job_id[:8]} queued ({backend}, {len(transcript) / 1000:.0f}k chars)")
         return job_id
 
+    def add_ask(self, system, user, backend):
+        """kind "ask": one system + user prompt to the local model or the cloud model (archive questions)."""
+        if backend not in ("local", "claude"):
+            raise ValueError("backend must be local or claude")
+        if backend == "claude" and not self.cfg.get("anthropic_api_key"):
+            raise ValueError("this server has no Anthropic API key")
+        job_id = uuid.uuid4().hex
+        job = {"id": job_id, "kind": "ask", "system": system, "user": user, "backend": backend, "vocab": "",
+               "status": "queued", "progress": 0.0, "text": "waiting", "created": time.time(),
+               "cancel": threading.Event()}
+        with self.lock:
+            self.jobs[job_id] = job
+        self._put(job_id, 1)
+        log(f"ask {job_id[:8]} queued ({backend}, {len(user) / 1000:.0f}k chars)")
+        return job_id
+
     def add_ocr(self, image, vocabulary=""):
         """kind "ocr": a photographed page of handwritten notes -> text, with the local Ollama vision model."""
         job_id = uuid.uuid4().hex
@@ -298,6 +315,14 @@ class Jobs:
             job["txt"] = sm.read_handwriting(job.pop("image"), self.cfg["ollama_url"], self.cfg["ocr_model"], glossary)
             return
         claude = sm.ClaudeNotes(self.cfg["anthropic_api_key"], self.cfg["claude_model"])
+        if job["kind"] == "ask":
+            system, user = job.pop("system"), job.pop("user")
+            if job["backend"] == "local":
+                job["txt"] = sm.OllamaNotes(self.cfg["ollama_url"], self.cfg["ollama_model"],
+                                            int(self.cfg["ollama_ctx"]))._ask(system, user, job["cancel"].is_set)
+            else:
+                job["txt"] = claude.ask(system, user, job["cancel"].is_set, effort="low", max_tokens=4000)[0]
+            return
         if job["kind"] == "clean":
             job["txt"], job["kept"] = sm.clean_transcript(
                 job.pop("transcript"), lambda s, u: claude.ask(s, u, job["cancel"].is_set, effort="low")[0],
@@ -401,7 +426,7 @@ class Jobs:
             if not job or job["cancel"].is_set():
                 continue
             t0 = time.time()
-            if job.get("kind") in ("notes", "clean", "ocr"):
+            if job.get("kind") in ("notes", "clean", "ocr", "ask"):
                 job["status"], job["text"] = "running", "working on the transcript"
                 if job["backend"] == "local" and engine is not None:
                     engine.park()  # free Whisper's GPU memory for the local LLM (weights stay in RAM)
@@ -547,7 +572,7 @@ def make_handler(cfg, jobs):
                     out["md"] = job["md"]
                 elif job.get("kind") == "clean":
                     out.update(txt=job["txt"], kept=job["kept"])
-                elif job.get("kind") == "ocr":
+                elif job.get("kind") in ("ocr", "ask"):
                     out["txt"] = job["txt"]
                 elif job.get("kind") == "dictate":
                     out.update(result=job["result"], raw=job["raw"], polished=job["polish"])
@@ -614,6 +639,16 @@ def make_handler(cfg, jobs):
                     return self._send(400, {"error": f"bad share: {e}"})
                 log(f"share {sid} received ({n // 1024} KB)")
                 return self._send(200, {"id": sid})
+            if u.path == "/ask":  # a question over passages the client found in its own recordings
+                n = int(self.headers.get("Content-Length") or 0)
+                if not 0 < n <= MAX_NOTES_BODY:
+                    return self._send(413, {"error": "body missing or too large"})
+                try:
+                    p = json.loads(self.rfile.read(n))
+                    job_id = jobs.add_ask(str(p["system"]), str(p["user"]), p.get("backend", "local"))
+                except (ValueError, KeyError, TypeError) as e:
+                    return self._send(400, {"error": f"bad request: {e}"})
+                return self._send(200, {"id": job_id})
             if u.path == "/ocr":  # a photo of handwritten notes -> text (local vision model)
                 n = int(self.headers.get("Content-Length") or 0)
                 if not 0 < n <= MAX_DICTATE_BODY:

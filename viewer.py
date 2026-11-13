@@ -1,5 +1,6 @@
 """Transcript viewer with an audio player (click a line = play from there) and search across recordings."""
 import os
+import re
 import threading
 import time
 import tkinter as tk
@@ -11,6 +12,7 @@ import numpy as np
 
 import archive
 import diarize as dz
+import recall
 
 RATE = 48000
 AUDIO_NAMES = ("meeting.mp3", "meeting.m4a", "them.flac", "them.wav")  # split track if the mix is gone
@@ -422,9 +424,12 @@ class SearchWindow:
         e.grid(row=0, column=0, sticky="ew")
         e.bind("<Return>", lambda ev: self.run())
         ttk.Button(top, text="Search", style="Accent.TButton", command=self.run).grid(row=0, column=1, padx=(px(6), 0))
+        self.ask_btn = ttk.Button(top, text="Ask", command=self.ask)
+        self.ask_btn.grid(row=0, column=2, padx=(px(6), 0))
         self.box = _TextBox(f, theme, row=1, height=24, width=96)
         self.text = self.box.text
-        self.status = tk.StringVar(value="Type words; every word must appear. Click a result to open it.")
+        self.status = tk.StringVar(value="Search: every word must appear. Ask: a question in your own words; "
+                                         "the answer cites the moments it comes from.")
         ttk.Label(f, textvariable=self.status, style="Muted.TLabel").grid(row=2, column=0, sticky="w", pady=(px(6), 0))
         w.geometry(f"{px(800)}x{px(600)}")
         e.focus_set()
@@ -448,6 +453,77 @@ class SearchWindow:
         elif self.index_msg:
             self.status.set(self.index_msg)
 
+    def ask(self):
+        """Answer a question from the recordings with the notes engine; every claim links to its moment."""
+        q = self.q.get().strip()
+        if not q or getattr(self, "asking", False):
+            return
+        if self.indexing:
+            self.status.set("Indexing recordings, one moment...")
+            self.win.after(400, self.ask)
+            return
+        llm = self.app.ask_llm(self.win)
+        if not llm:
+            return
+        self.asking, self.ask_out, self.ask_stage = True, None, "Thinking..."
+        self.ask_btn.state(["disabled"])
+
+        def work():  # worker thread: no Tk calls
+            try:
+                self.ask_out = recall.answer(q, self.arch, llm, lambda t: setattr(self, "ask_stage", t))
+            except Exception as e:
+                self.ask_out = e
+        threading.Thread(target=work, daemon=True).start()
+        self._ask_poll(q)
+
+    def _ask_poll(self, q):
+        if not self.win.winfo_exists():
+            return
+        if self.ask_out is None:
+            self.status.set(self.ask_stage)
+            self.win.after(300, lambda: self._ask_poll(q))
+            return
+        self.asking = False
+        self.ask_btn.state(["!disabled"])
+        if isinstance(self.ask_out, Exception):
+            self.status.set(f"Could not answer: {self.ask_out}")
+            return
+        text, ps, words = self.ask_out
+        t = self.text
+        t.config(state="normal")
+        t.delete("1.0", "end")
+        by_n = {p["n"]: p for p in ps}
+
+        def open_p(p):
+            ViewerWindow(self.app, p["path"], at=p["t"] if p["t"] >= 0 else None)
+        if not ps:
+            t.insert("end", "Nothing in the recordings matches this question.\n", "muted")
+            t.insert("end", "Searched for: " + ", ".join(words), "muted")
+        else:
+            t.insert("end", q + "\n\n", "title")
+            pos = 0
+            for m in re.finditer(r"\[(\d+(?:\s*,\s*\d+)*)\]", text):  # [3] and [1, 2, 7]
+                t.insert("end", text[pos:m.start()])
+                for k, num in enumerate(re.findall(r"\d+", m.group(1))):
+                    p = by_n.get(int(num))
+                    tag = f"c{m.start()}_{k}"
+                    t.insert("end", f"[{num}]", ("ts", tag) if p else ())
+                    if p:
+                        t.tag_bind(tag, "<Button-1>", lambda e, p=p: open_p(p))
+                pos = m.end()
+            t.insert("end", text[pos:] + "\n\n")
+            t.insert("end", "Sources (click to open and listen)\n", "title")
+            for p in ps:
+                tag = f"s{p['n']}"
+                where = fmt(p["t"]) if p["t"] >= 0 else "notes"
+                t.insert("end", f"[{p['n']}] ", ("ts", tag))
+                t.insert("end", f"{_label(p)} · {where}\n", ("who", tag))
+                t.insert("end", "     " + p["text"].replace("\n", " ")[:220] + "\n", tag)
+                t.tag_bind(tag, "<Button-1>", lambda e, p=p: open_p(p))
+            t.insert("end", "\nAn AI wrote this answer from the passages above. Open a source to check it.", "muted")
+        t.config(state="disabled")
+        self.status.set(f"Answer from {len(ps)} passages in {len({p['path'] for p in ps})} recordings.")
+
     def run(self):
         q = self.q.get().strip()
         if not q:
@@ -469,7 +545,9 @@ class SearchWindow:
             head = f"h{n}"
             name = Path(path).name[:16].replace("_", " ")
             t.insert("end", f"{rows[0]['title']}", ("title", head))
-            t.insert("end", f"   {name}\n", ("muted", head))
+            tags = self.arch.tags(path)
+            t.insert("end", f"   {name}" + ("   " + "  ".join("#" + x for x in tags[:6]) if tags else "") + "\n",
+                     ("muted", head))
             t.tag_bind(head, "<Button-1>", lambda e, p=path: ViewerWindow(self.app, p, highlight=q))
             for i, h in enumerate(rows[:8]):
                 tag = f"r{n}_{i}"
@@ -490,3 +568,73 @@ class SearchWindow:
             t.insert("end", "Nothing found.", "muted")
         t.config(state="disabled")
         self.status.set(f"{len(hits)} hits in {len(by_folder)} recordings ({(time.perf_counter() - t0) * 1000:.0f} ms)")
+
+
+def _label(p):
+    """'Weekly sync · 2026-11-13', or just the date when the recording has no meeting title."""
+    return p["date"] if p["title"] == Path(p.get("folder") or p["path"]).name else f"{p['title']} · {p['date']}"
+
+
+class PromisesWindow:
+    """Action items from every meeting's notes, by person. Click the box to tick it, the meeting to open it."""
+
+    def __init__(self, app, folders_fn):
+        self.app, self.folders_fn = app, folders_fn
+        theme, px = app.theme, app.theme.px
+        w = self.win = tk.Toplevel(app.root)
+        w.title("Open promises · CryRec")
+        theme.register(w)
+        w.columnconfigure(0, weight=1)
+        w.rowconfigure(0, weight=1)
+        f = ttk.Frame(w, padding=px(12))
+        f.grid(sticky="nsew")
+        f.columnconfigure(0, weight=1)
+        f.rowconfigure(1, weight=1)
+        top = ttk.Frame(f)
+        top.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, px(8)))
+        self.show_done = tk.BooleanVar(value=False)
+        ttk.Checkbutton(top, text="Show done too", variable=self.show_done, command=self.load).grid(row=0, column=0)
+        self.box = _TextBox(f, theme, row=1, height=24, width=96)
+        self.text = self.box.text
+        self.status = tk.StringVar()
+        ttk.Label(f, textvariable=self.status, style="Muted.TLabel").grid(row=2, column=0, sticky="w", pady=(px(6), 0))
+        w.geometry(f"{px(760)}x{px(600)}")
+        self.load()
+
+    def load(self):
+        items = recall.promises(self.folders_fn())
+        me = (self.app.cfg.get("my_name") or "Me").lower()
+        shown = [p for p in items if self.show_done.get() or not p["done"]]
+        owners = sorted({p["owner"] or "(no owner)" for p in shown}, key=lambda o: (o.lower() not in (me, "me"), o.lower()))
+        t = self.text
+        pos = t.yview()[0]
+        t.config(state="normal")
+        t.delete("1.0", "end")
+        n = 0
+        for o in owners:
+            mine = [p for p in shown if (p["owner"] or "(no owner)") == o]
+            t.insert("end", f"{o}  ({sum(1 for p in mine if not p['done'])} open)\n", "title")
+            for p in mine:
+                n += 1
+                box, row = f"b{n}", f"m{n}"
+                t.insert("end", "   ☑ " if p["done"] else "   ☐ ", ("ts", box))
+                t.insert("end", p["task"] + (f"  (due: {p['due']})" if p["due"] else ""), "muted" if p["done"] else ())
+                t.insert("end", f"   {_label(p)}\n", ("who", row))
+                t.tag_bind(box, "<Button-1>", lambda e, p=p: self.toggle(p))
+                t.tag_bind(row, "<Button-1>", lambda e, p=p: ViewerWindow(self.app, p["folder"], highlight=p["task"][:24]))
+            t.insert("end", "\n")
+        if not shown:
+            t.insert("end", "No open action items in your meeting notes.", "muted")
+        t.config(state="disabled")
+        t.yview_moveto(pos)
+        self.status.set(f"{sum(1 for p in items if not p['done'])} open, {sum(1 for p in items if p['done'])} done, "
+                        f"from {len({p['folder'] for p in items})} meetings. Ticking changes that meeting's notes.md.")
+
+    def toggle(self, p):
+        try:
+            if recall.toggle_promise(p) is None:
+                self.status.set("That notes file changed; list refreshed.")
+        except OSError as e:
+            self.status.set(f"Can't change the notes: {e}")
+            return
+        self.load()

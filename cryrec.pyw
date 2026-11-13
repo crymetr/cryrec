@@ -43,12 +43,13 @@ import diarize as dz
 import dictate
 import live as lv
 import meetinginfo as mi
+import recall
 import summarize as sm
 import transcribe as tr
 import viewer
 
 APP = "CryRec"
-VERSION = "0.22.2"
+VERSION = "0.23.0"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -469,6 +470,35 @@ def run_notes(cfg, session_dir, progress, cancel):
         }[engine]()
         md = backend.notes(transcript, my_name, language, progress, cancel, glossary)
     return sm.write_notes(session_dir, md, mi.load(session_dir))
+
+
+def llm_for(cfg):
+    """ask(system, user) -> text with the notes engine chosen in Settings (so work stays on the engine you
+    picked for work), or None when notes are off."""
+    engine = cfg.get("notes_engine", "off")
+    never = lambda: False  # noqa: E731
+    if engine in ("server_local", "server_claude"):
+        backend = "local" if engine == "server_local" else "claude"
+
+        def ask(s, u):  # give up after 4 minutes (the server works on one job at a time)
+            end = time.monotonic() + 240
+            try:
+                return sm.remote_ask(cfg.get("server_url", ""), secret_get(cfg, "server_key"), s, u, backend,
+                                     lambda: time.monotonic() > end)
+            except sm.Cancelled:
+                raise RuntimeError("the server is busy (a transcript may be running). Try again in a while.") from None
+        return ask
+    if engine == "claude":
+        c = sm.ClaudeNotes(secret_get(cfg, "claude_key"), cfg.get("claude_model"))
+        return lambda s, u: c.ask(s, u, never, effort="low", max_tokens=4000)[0]
+    if engine == "openai":
+        o = sm.OpenAINotes(cfg.get("api_url") or DEFAULT_API_URL, secret_get(cfg, "api_key"),
+                           cfg.get("notes_model") or "llama-3.3-70b-versatile")
+        return lambda s, u: o._ask(s, u, never)
+    if engine == "ollama":
+        o = sm.OllamaNotes(cfg.get("ollama_url"), cfg.get("ollama_model"))
+        return lambda s, u: o._ask(s, u, never)
+    return None
 
 
 def run_speakers(session_dir, progress, cancel):
@@ -1577,6 +1607,30 @@ class App:
             return
         self._queue(d, self._transcript_settings(), "speakers")
 
+    def ask_llm(self, parent=None):
+        """The model for archive questions = the notes engine. Tells the user when none is set."""
+        cfg = self._transcript_settings()
+        if cfg.get("notes_engine", "off") == "off":
+            messagebox.showinfo(APP, "Ask uses the notes engine. Pick one in Settings > Notes first.\n\n"
+                                     "(Search works without it.)", parent=parent or self.root)
+            return None
+        return llm_for(cfg) if self._notes_ready(cfg) else None
+
+    def open_promises(self):
+        viewer.PromisesWindow(self, self.all_folders)
+
+    def _last_time(self, meeting):
+        """After Record: what was left open the last time this meeting (same title or people) took place."""
+        try:
+            prev = recall.previous_meeting(meeting, self.all_folders(), skip=self.session_dir)
+            text = recall.brief(prev) if prev else ""
+        except Exception:
+            return
+        if text:
+            Popup(self.root, APP, f"Last time ({recall.when(prev)}):\n{text}",
+                  [("Open notes", lambda: os.startfile(prev / "notes.md")), ("OK", lambda: None)], countdown=90,
+                  countdown_text="This closes in {s} s")
+
     def add_action_items(self, m, d):
         m.add_command(label="Copy for AI chat", command=lambda: self.copy_ai_prompt(d))
         for name, cmd in load_actions():
@@ -1632,7 +1686,8 @@ class App:
 
     def show_menu(self):
         m = tk.Menu(self.root, tearoff=False)
-        m.add_command(label="Search recordings...", command=self.open_search)
+        m.add_command(label="Search and ask...", command=self.open_search)
+        m.add_command(label="Open promises...", command=self.open_promises)
         if self.recording:
             m.add_command(label="Mark this moment  (Win+Alt+M)", command=self.mark_moment)
         m.add_separator()
@@ -2149,6 +2204,7 @@ class App:
             return
         if meeting:
             mi.save(self.session_dir, meeting)
+            self.root.after(1500, lambda m=meeting: self._last_time(m))
 
         self.cfg.update(input=self.in_var.get(), output=self.out_var.get(), out_dir=str(out_root))
         save_config(self.cfg)
