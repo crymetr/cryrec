@@ -12,6 +12,8 @@ API (all need "Authorization: Bearer <key>"):
     GET    /health            {ok, version, model, device}
     POST   /jobs?language=&name=&speakers=1   body = zip with me.mp3 / them.mp3 (or meeting.mp3 / .m4a) -> {id}
                                speakers=1: the other side / single track is split into Speaker 1..N
+    GET    /voices            {voices: [{name, seconds, meetings}]}
+    DELETE /voices?name=      forget a saved voice
     POST   /voices            JSON {name, vec, seconds}: a client named a speaker (suggested next time)
     POST   /embed             JSON {texts: [...], kind: q|d} -> {vectors, model} (local Ollama embedding model)
     POST   /ask               JSON {system, user, backend: local|claude} -> {id}; job result {txt}
@@ -59,7 +61,7 @@ import diarize as dz  # noqa: E402
 import summarize as sm  # noqa: E402
 import transcribe as tr  # noqa: E402
 
-VERSION = "0.16.0"
+VERSION = "0.17.0"
 APPDATA = Path(os.environ.get("APPDATA", Path.home())) / "CryRec"
 LOCALAPPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "CryRec"
 DEFAULTS = {
@@ -570,6 +572,8 @@ def make_handler(cfg, jobs):
                                         "notes": {"local": bool(cfg.get("ollama_url")),
                                                   "claude": bool(cfg.get("anthropic_api_key"))},
                                         "share": bool(cfg.get("share_dir"))})
+            if path == "/voices":  # names only; the voice numbers never leave the server
+                return self._send(200, {"voices": dz.voice_list(cfg["voices_file"])})
             job = jobs.get(self._job_id() or "")
             if not job:
                 return self._send(404, {"error": "not found"})
@@ -718,6 +722,13 @@ def make_handler(cfg, jobs):
         def do_DELETE(self):
             if not self._authed():
                 return
+            u = urlparse(self.path)
+            if u.path == "/voices":  # forget a saved voice: DELETE /voices?name=...
+                name = parse_qs(u.query).get("name", [""])[0]
+                if not dz.forget(cfg["voices_file"], name):
+                    return self._send(404, {"error": "no such voice"})
+                log("voice forgotten")
+                return self._send(200, {"ok": True})
             job = jobs.get(self._job_id() or "")
             if not job:
                 return self._send(404, {"error": "not found"})

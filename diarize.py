@@ -188,6 +188,25 @@ def suggest(voices, vec, taken=()):
 _voices_lock = threading.Lock()  # the server may get two /voices calls at once
 
 
+def forget(path, name):
+    """Remove a saved voice (a wrong name, or a person who should not be remembered). True if it was there."""
+    with _voices_lock:
+        voices = load_voices(path)
+        if name not in voices:
+            return False
+        del voices[name]
+        tmp = Path(str(path) + ".tmp")
+        tmp.write_text(json.dumps(voices), encoding="utf-8")
+        tmp.replace(path)
+        return True
+
+
+def voice_list(path):
+    """[{name, seconds, meetings}] of the saved voices, most heard first."""
+    return sorted(({"name": n, "seconds": round(float(v.get("seconds", 0))), "meetings": int(v.get("meetings", 0))}
+                   for n, v in load_voices(path).items()), key=lambda v: -v["seconds"])
+
+
 def remember(path, name, vec, seconds):
     """Fold a confirmed speaker into the saved voice (weighted by speech time, capped so it keeps adapting)."""
     with _voices_lock:

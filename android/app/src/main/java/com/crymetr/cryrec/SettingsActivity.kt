@@ -128,6 +128,10 @@ class SettingsActivity : Activity() {
         })
         form.addView(fb)
 
+        header("Saved voices")
+        hint("Your server remembers the voices you named, to suggest the names next time. Forget one here if a name was wrong.")
+        form.addView(button("Show saved voices") { showVoices() })
+
         header("Updates")
         hint("CryRec checks GitHub twice a day and installs new versions by itself, never while it records or dictates. " +
             "Android asks you to confirm the first update; later ones go through on their own.")
@@ -195,6 +199,40 @@ class SettingsActivity : Activity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         if (requestCode == REQ_CALENDAR && checkSelfPermission(android.Manifest.permission.READ_CALENDAR) !=
             android.content.pm.PackageManager.PERMISSION_GRANTED) calendar.isChecked = false
+    }
+
+    private fun showVoices() {
+        save()
+        Thread {
+            val r = runCatching { Api(p).voices() }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                val list = r.getOrNull()
+                if (list == null) {
+                    android.widget.Toast.makeText(this, "Could not load: ${r.exceptionOrNull()?.message}", android.widget.Toast.LENGTH_LONG).show()
+                    return@runOnUiThread
+                }
+                if (list.isEmpty()) {
+                    android.app.AlertDialog.Builder(this).setMessage("No saved voices yet.").setPositiveButton("OK", null).show()
+                    return@runOnUiThread
+                }
+                val names = list.map { it.optString("name") }
+                val rows = list.map { it.optString("name") + "  ·  " + formatDuration(it.optLong("seconds")) + " of speech" }
+                android.app.AlertDialog.Builder(this).setTitle("Saved voices (tap to forget)")
+                    .setItems(rows.toTypedArray()) { _, i ->
+                        android.app.AlertDialog.Builder(this).setMessage("Forget the voice of ${names[i]}?")
+                            .setPositiveButton("Forget") { _, _ ->
+                                Thread {
+                                    val ok = runCatching { Api(p).forgetVoice(names[i]) }
+                                    runOnUiThread {
+                                        android.widget.Toast.makeText(applicationContext, if (ok.isSuccess) "Forgotten." else "Could not forget: ${ok.exceptionOrNull()?.message}",
+                                            android.widget.Toast.LENGTH_SHORT).show()
+                                    }
+                                }.start()
+                            }.setNegativeButton("Keep", null).show()
+                    }.setNegativeButton("Close", null).show()
+            }
+        }.start()
     }
 
     private fun header(t: String) = form.addView(TextView(this).apply {

@@ -88,6 +88,17 @@
             android:text="Listen for conversations"
             android:textColor="@color/text"
             android:textSize="14sp" />
+        <TextView
+            android:id="@+id/ask"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/pill"
+            android:gravity="center"
+            android:paddingHorizontal="16dp"
+            android:text="Ask your recordings"
+            android:textColor="@color/text"
+            android:textSize="14sp" />
 
         <LinearLayout
             android:id="@+id/levels"

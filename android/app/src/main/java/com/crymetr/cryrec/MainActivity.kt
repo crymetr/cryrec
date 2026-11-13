@@ -51,6 +51,7 @@ class MainActivity : Activity() {
         listen = findViewById(R.id.listen)
         listen.setOnClickListener { toggleListen() }
         listen.setOnLongClickListener { pickListenHours(); true }
+        findViewById<View>(R.id.ask).setOnClickListener { startActivity(Intent(this, AskActivity::class.java)) }
         levels = findViewById(R.id.levels)
         levelText = findViewById(R.id.level_text)
         gainValue = findViewById(R.id.gain_value)

@@ -112,7 +112,22 @@ class DetailActivity : Activity() {
         setContentView(android.widget.FrameLayout(this).apply { fitsSystemWindows = true; addView(root) })
     }
 
-    override fun onResume() { super.onResume(); ui.post(tick) }
+    override fun onResume() {
+        super.onResume()
+        ui.post(tick)
+        val at = intent.getIntExtra("at", -1)  // opened from an answer's source: show the transcript, cue the audio
+        if (at >= 0) {
+            intent.removeExtra("at")
+            showNotes = false
+            lastKey = ""
+            ui.post {
+                if (session.audio.exists()) prepare()?.let {
+                    it.seekTo((maxOf(0, at - 2) * 1000).coerceAtMost(maxOf(0, it.duration - 1000)))
+                    showPosition()
+                }
+            }
+        }
+    }
     override fun onPause() {
         ui.removeCallbacks(tick)
         ui.removeCallbacks(playTick)
@@ -197,6 +212,7 @@ class DetailActivity : Activity() {
             })
         if (s == "done" && Speakers.load(session.dir).isNotEmpty()) actions.addView(pill("Names") { showNames() })
         if ((s == "done" || s == "saved" || s == "failed") && Prefs(this).configured) actions.addView(pill("Scan notes") { scan() })
+        if (s == "done" && transcript.isNotEmpty() && Prefs(this).configured) actions.addView(pill("Draft") { pickDraft() })
         if (s == "done" && Prefs(this).notesEngine != "off") actions.addView(pill("Redo notes") {
             session.notes.delete()
             session.update("status" to "queued")
@@ -243,6 +259,52 @@ class DetailActivity : Activity() {
             putExtra(Intent.EXTRA_SUBJECT, (if (showNotes) "Meeting notes " else "Transcript ") + session.name)
             putExtra(Intent.EXTRA_TEXT, text)
         }, null))
+    }
+
+    /** A follow-up email, escalation summary or handover note, written by the server's AI from this recording. */
+    private fun pickDraft() {
+        val kinds = Recall.DRAFTS.keys.toTypedArray()
+        AlertDialog.Builder(this).setTitle("Draft").setItems(kinds) { _, i ->
+            val kind = kinds[i]
+            val wait = AlertDialog.Builder(this).setTitle(kind).setMessage("Writing…").setNegativeButton("Cancel", null).create()
+            val cancelled = java.util.concurrent.atomic.AtomicBoolean(false)
+            wait.setOnDismissListener { cancelled.set(true) }
+            wait.show()
+            Thread {
+                val r = runCatching { Recall.draft(applicationContext, session, kind) { cancelled.get() } }
+                r.onSuccess { text ->  // kept even when the screen is gone by now
+                    runCatching {
+                        java.io.File(session.dir, "drafts").mkdirs()
+                        java.io.File(session.dir, "drafts/" + kind.lowercase().replace(' ', '_') + ".md").writeText(text + "\n")
+                    }
+                }
+                runOnUiThread {
+                    if (isFinishing || isDestroyed || cancelled.get()) return@runOnUiThread
+                    wait.setOnDismissListener(null)
+                    runCatching { wait.dismiss() }
+                    r.onFailure {
+                        android.widget.Toast.makeText(this, "Could not write it: ${it.message}", android.widget.Toast.LENGTH_LONG).show()
+                    }.onSuccess { text ->
+                        val view = TextView(this).apply {
+                            this.text = text; textSize = 14f; setTextIsSelectable(true)
+                            setTextColor(getColor(R.color.text)); setPadding(dp(20), dp(12), dp(20), 0)
+                        }
+                        AlertDialog.Builder(this).setTitle(kind)
+                            .setView(ScrollView(this).apply { addView(view) })
+                            .setPositiveButton("Share") { _, _ ->
+                                startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"; putExtra(Intent.EXTRA_TEXT, text)
+                                }, null))
+                            }
+                            .setNeutralButton("Copy") { _, _ ->
+                                getSystemService(android.content.ClipboardManager::class.java)
+                                    .setPrimaryClip(android.content.ClipData.newPlainText(kind, text))
+                            }
+                            .setNegativeButton("Close", null).show()
+                    }
+                }
+            }.start()
+        }.show()
     }
 
     /** Photograph paper notes with Google's document scanner (crop, straighten, clean up); the server reads them. */

@@ -620,7 +620,9 @@ class PromisesWindow:
                 box, row = f"b{n}", f"m{n}"
                 t.insert("end", "   ☑ " if p["done"] else "   ☐ ", ("ts", box))
                 t.insert("end", p["task"] + (f"  (due: {p['due']})" if p["due"] else ""), "muted" if p["done"] else ())
-                t.insert("end", f"   {_label(p)}\n", ("who", row))
+                t.insert("end", f"   {_label(p)}", ("who", row))
+                t.insert("end", "   send ▸\n", ("ts", f"g{n}"))
+                t.tag_bind(f"g{n}", "<Button-1>", lambda e, p=p: self.app.promise_menu(p, e.x_root, e.y_root))
                 t.tag_bind(box, "<Button-1>", lambda e, p=p: self.toggle(p))
                 t.tag_bind(row, "<Button-1>", lambda e, p=p: ViewerWindow(self.app, p["folder"], highlight=p["task"][:24]))
             t.insert("end", "\n")
@@ -704,3 +706,114 @@ class TextWindow:
         self.win.clipboard_clear()
         self.win.clipboard_append(self.out)
         self.status.set("Copied.")
+
+
+class VoicesWindow:
+    """Voices CryRec remembers for name suggestions, on this PC and on your server. Forget removes one."""
+
+    def __init__(self, app, voices_file):
+        self.app, self.file = app, voices_file
+        theme, px = app.theme, app.theme.px
+        w = self.win = tk.Toplevel(app.root)
+        w.title("Saved voices · CryRec")
+        theme.register(w)
+        w.columnconfigure(0, weight=1)
+        w.rowconfigure(0, weight=1)
+        f = ttk.Frame(w, padding=px(12))
+        f.grid(sticky="nsew")
+        f.columnconfigure(0, weight=1)
+        f.rowconfigure(0, weight=1)
+        self.box = _TextBox(f, theme, row=0, height=16, width=64)
+        self.text = self.box.text
+        self.status = tk.StringVar(value="Loading...")
+        ttk.Label(f, textvariable=self.status, style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(px(6), 0))
+        w.geometry(f"{px(520)}x{px(420)}")
+        self.server = None  # None = not asked / no server, list = the server's voices, str = error
+        self.load_server()
+        self.show()
+
+    def _server(self):
+        return self.app.server_pair()  # (url, key) or None
+
+    def load_server(self):
+        srv = self._server()
+        if not srv:
+            return
+
+        def work():  # worker thread: no Tk calls
+            import summarize as sm
+            try:
+                self.server = sm.remote_voices(*srv)
+            except Exception as e:
+                self.server = f"Server: {e}"
+            self.loaded = True
+        self.loaded = False
+        threading.Thread(target=work, daemon=True).start()
+        self._wait()
+
+    def _wait(self):
+        if self.win.winfo_exists():
+            if getattr(self, "loaded", True):
+                self.show()
+            else:
+                self.win.after(300, self._wait)
+
+    def show(self):
+        t = self.text
+        t.config(state="normal")
+        t.delete("1.0", "end")
+        n = 0
+        groups = [("On this PC", dz.voice_list(self.file), "pc")]
+        if isinstance(self.server, list):
+            groups.append(("On your server (phone recordings)", self.server, "server"))
+        for title, voices, where in groups:
+            t.insert("end", f"{title}\n", "title")
+            if not voices:
+                t.insert("end", "   none\n", "muted")
+            for v in voices:
+                n += 1
+                tag = f"x{n}"
+                t.insert("end", f"   {v['name']}", "who")
+                t.insert("end", f"   {fmt(v['seconds'])} of speech, {v['meetings']} meetings   ", "muted")
+                t.insert("end", "forget\n", ("ts", tag))
+                t.tag_bind(tag, "<Button-1>", lambda e, name=v["name"], where=where: self.forget(name, where))
+            t.insert("end", "\n")
+        t.config(state="disabled")
+        self.status.set(self.server if isinstance(self.server, str) else
+                        "A forgotten voice is no longer suggested. Names already in transcripts stay.")
+
+    def forget(self, name, where):
+        from tkinter import messagebox
+        if not messagebox.askyesno("CryRec", f"Forget the voice of {name}?", parent=self.win):
+            return
+        if where == "pc":
+            try:
+                dz.forget(self.file, name)
+            except OSError as e:
+                self.status.set(f"Could not forget: {e}")
+                return
+            self.show()
+            return
+        srv, box = self._server(), {}
+        self.status.set("Asking the server...")
+
+        def work():  # worker thread: no Tk calls
+            import summarize as sm
+            try:
+                sm.remote_forget(*srv, name)
+                box["ok"] = True
+            except Exception as e:
+                box["err"] = "the server does not know this voice (or is an older version)" if "not found" in str(e) else str(e)
+
+        def poll():
+            if not self.win.winfo_exists():
+                return
+            if not box:
+                self.win.after(200, poll)
+            elif "ok" in box:
+                self.server = [v for v in self.server if v["name"] != name]
+                self.show()
+            else:
+                self.status.set(f"Could not forget: {box['err']}")
+        threading.Thread(target=work, daemon=True).start()
+        poll()

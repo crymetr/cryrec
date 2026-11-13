@@ -419,3 +419,25 @@ def remote_embed(url, key, texts, kind):
         out += r["vectors"]
         model = r["model"]
     return out, "server:" + model
+
+
+def remote_voices(url, key):
+    from transcribe import _server_call
+    return _server_call(f"{url.rstrip('/')}/voices", key)["voices"]
+
+
+def remote_forget(url, key, name):
+    from urllib.parse import quote
+    from transcribe import _server_call
+    _server_call(f"{url.rstrip('/')}/voices?name={quote(name)}", key, method="DELETE")
+
+
+def remote_share(url, key, text, note, subject=""):
+    """Put a text into the server's share folder (the same door as the phone's "Send to my PC")."""
+    import io
+    import zipfile
+    from transcribe import _server_call
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("share.json", json.dumps({"text": text, "note": note, "subject": subject}, ensure_ascii=False))
+    return _server_call(f"{url.rstrip('/')}/share", key, data=buf.getvalue(), content_type="application/zip")["id"]

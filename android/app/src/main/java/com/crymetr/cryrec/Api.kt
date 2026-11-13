@@ -91,6 +91,16 @@ class Api(private val base: String, private val key: String) {
         json("/ocr", JSONObject().put("image_b64", android.util.Base64.encodeToString(image, android.util.Base64.NO_WRAP))
             .put("vocabulary", vocabulary), 60_000).getString("id")
 
+    /** One prompt to the server's local model ("local") or its cloud key ("claude"). Returns the job id. */
+    fun ask(system: String, user: String, backend: String): String =
+        json("/ask", JSONObject().put("system", system).put("user", user).put("backend", backend), 60_000).getString("id")
+
+    /** Names of the voices the server remembers. */
+    fun voices(): List<JSONObject> = call("GET", "/voices").optJSONArray("voices")
+        ?.let { a -> (0 until a.length()).map { a.getJSONObject(it) } } ?: emptyList()
+
+    fun forgetVoice(name: String) { call("DELETE", "/voices?name=" + URLEncoder.encode(name, "UTF-8")) }
+
     /** A speaker was named: the server remembers the voice and suggests the name next time. */
     fun voice(name: String, vec: org.json.JSONArray, seconds: Double) {
         json("/voices", JSONObject().put("name", name).put("vec", vec).put("seconds", seconds))
