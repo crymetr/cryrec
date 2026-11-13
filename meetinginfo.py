@@ -90,7 +90,8 @@ def outlook_meeting(now=None):
             if p and p not in people:
                 people.append(p)
         title = str(best.Subject or "").strip()
-        return {"title": title, "attendees": people, "source": "outlook"} if title or people else None
+        return {"title": title, "attendees": people, "source": "outlook",
+                "start": _naive(best.Start).isoformat(timespec="minutes")} if title or people else None
     except Exception:
         return None
     finally:
@@ -144,6 +145,23 @@ def teams_meeting():
         return None  # Teams is open but not in a call: its window title is a chat, not a meeting
     title = teams_title(_window_titles({"ms-teams.exe", "teams.exe"}))
     return {"title": title, "attendees": [], "source": "teams"} if title else None
+
+
+def starting_meeting(timeout=3.0, now=None):
+    """The Outlook meeting that starts about now (2 min before to 5 min after its start), else None."""
+    out = {}
+
+    def look():
+        out["m"] = outlook_meeting(now)
+
+    t = threading.Thread(target=look, daemon=True)
+    t.start()
+    t.join(timeout)
+    m = out.get("m")
+    if not m or not m.get("start"):
+        return None
+    delta = ((now or datetime.now()) - datetime.fromisoformat(m["start"])).total_seconds()
+    return m if -120 <= delta <= 300 else None
 
 
 def current_meeting(timeout=3.0):

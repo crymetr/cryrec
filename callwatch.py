@@ -6,6 +6,7 @@ While an app holds the mic, its LastUsedTimeStop is 0. Teams, Zoom and Webex ope
 whole call, so "mic in use" is a good sign that a call is running.
 """
 
+import re
 import winreg
 
 MIC_KEY = r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
@@ -36,9 +37,28 @@ def _subkeys(key):
         i += 1
 
 
+BROWSERS = {"chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe", "vivaldi.exe"}
+# a browser holding the mic is a call only when one of its windows shows a meeting page
+WEB_CALLS = [(re.compile(r"^Meet\b|Google Meet", re.I), "Google Meet"),
+             (re.compile(r"\|\s*Microsoft Teams|Microsoft Teams\s*\(?(meeting|call)", re.I), "Teams (web)"),
+             (re.compile(r"\bZoom\b", re.I), "Zoom (web)"),
+             (re.compile(r"\bWebex\b", re.I), "Webex (web)"),
+             (re.compile(r"\bJitsi\b|\bWhereby\b|Discord", re.I), "Web call")]
+
+
+def web_call(titles):
+    """Meeting app name if one of these browser window titles is a meeting page, else None."""
+    for t in titles:
+        for pat, name in WEB_CALLS:
+            if pat.search(t):
+                return name
+    return None
+
+
 def active_calls():
     """Names of meeting apps that hold the microphone right now, e.g. {"Teams"}."""
     found = set()
+    browser_mic = False
     try:
         root = winreg.OpenKey(winreg.HKEY_CURRENT_USER, MIC_KEY)
     except OSError:
@@ -56,6 +76,10 @@ def active_calls():
             with winreg.OpenKey(root, "NonPackaged") as np:
                 for name in _subkeys(np):
                     exe = name.replace("#", "\\").rsplit("\\", 1)[-1].lower()
+                    if exe in BROWSERS:
+                        with winreg.OpenKey(np, name) as k:
+                            browser_mic = browser_mic or _in_use(k)
+                        continue
                     app = DESKTOP.get(exe)
                     if app:
                         with winreg.OpenKey(np, name) as k:
@@ -63,6 +87,11 @@ def active_calls():
                                 found.add(app)
         except OSError:
             pass
+    if browser_mic:
+        import meetinginfo  # lazy: meetinginfo imports this module
+        app = web_call(meetinginfo._window_titles(BROWSERS))
+        if app:
+            found.add(app)
     return found
 
 

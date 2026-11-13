@@ -44,6 +44,8 @@ Keys are stored encrypted for your Windows user (DPAPI), not as plain text.
 CryRec can sit in the tray (closing the window hides it; right-click the tray icon > Quit to exit) and start with Windows. While it runs:
 
 - When Teams, Zoom or Webex starts using the microphone, a small box asks **Record it?** It never records without asking.
+- Calls in the browser count too: when Chrome, Edge, Firefox (and other common browsers) use the mic while one of their windows shows Google Meet, Teams on the web, Zoom or Webex. A browser using the mic for anything else (voice search, dictation) is ignored.
+- With classic Outlook open, a meeting in your calendar that starts now (a room meeting has no call to notice) gets the same question once.
 - When that call ends, or when neither the mic nor the speaker has made a sound for a few minutes (5 by default), it asks **Stop and save?** and stops by itself after 30 seconds if you don't answer.
 
 It reads which app is using the microphone from Windows (`CapabilityAccessManager` in the registry): no admin rights, no meeting-app plugins. Turn it on or off under **Settings → Calls & dictation**.
@@ -147,6 +149,7 @@ The API is documented at the top of `server/cryrec_server.py`.
 - **Microphone**: Settings > Recording. "Phone mic" (default) keeps recording the room even with headphones plugged in; "Headset mic" uses a wired or USB headset; "Automatic" lets Android pick. Some phones ignore the choice for wired headsets; the meter line shows which mic is in use.
 - **Listen**: open a recording and tap Listen to play it back, with a slider to jump around.
 - **Listen for conversations**: tap the button under Record and CryRec listens for people talking, for 3 hours (long press to pick 1 to 8). Every 15 seconds it opens the mic for 2 seconds and decides on the phone whether someone is talking (loud bursts with a voice pitch, so fans, traffic, typing or rustling don't count); the audio is thrown away at once, nothing is saved or sent. When 2 of the last 3 checks heard speech, or a call is going on, it asks with a notification: **Record** starts a normal recording, **Not now** keeps quiet for 30 minutes. It never records by itself. While it listens a notification says so (Android requires it), and the green mic dot flashes during each check. It keeps the phone lightly awake, so it costs some battery; it turns itself off at the end.
+- **Meeting reminders**: Settings > Meetings > "Ask when a calendar meeting starts". When a meeting in the phone's calendar (any account synced to it) begins, a notification asks to record it; **Record** starts recording. It reads only start times and titles, on the phone, and needs the calendar permission. Android may deliver the reminder a few minutes early or late.
 - **Who is who**: the server splits the phone's single track into Speaker 1, Speaker 2... (needs a 0.13+ server). Open a recording > **Names**: ▶ plays each speaker's sample, type the name and Save names; the transcript switches to the names and you can rewrite the notes. Give two speakers the same name if they are one person. Names are sent to your server, which remembers the voices and suggests them next time.
 - When you stop, the recording is sent to your server. The transcript, the optional Clean up and the notes come back into the app. Share sends them to any app as text. Without a server set, recordings stay on the phone until you add one.
 - **Dictation keyboard**: Settings > Turn on keyboard, then pick "CryRec dictation" with the keyboard button. Tap the mic, talk, tap again (or hold the mic and let go). The text is typed where the cursor is. ⌫ cancels while it listens. The keyboard button switches back to your normal keyboard.
@@ -242,5 +245,6 @@ powershell -File packaging\build.ps1
 - v0.17: transcript viewer with player (click a line to hear it), search across all recordings, bookmarks, actions
 - v0.18: who said what: Speaker 1, 2... on the other side, name them once, voices remembered
 - v0.19: who said what on the phone too (split on your server, named in the app)
-- v0.20: Android listen mode: notices a conversation and asks whether to record it (this)
+- v0.20: Android listen mode: notices a conversation and asks whether to record it
+- v0.21: calls in the browser and Outlook meetings starting now (desktop), calendar meeting reminders (Android) (this)
 - next: smarter answers over the archive, handwritten notes, better meeting detection

@@ -48,7 +48,7 @@ import transcribe as tr
 import viewer
 
 APP = "CryRec"
-VERSION = "0.20.0"
+VERSION = "0.21.0"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -1016,7 +1016,7 @@ class SettingsDialog:
         # ---- Calls & dictation
         c = tabs["calls"]
         self._section(c, "calls", "Calls")
-        self.watch = self._check(c, "calls", "Offer to record Teams, Zoom and Webex calls", cfg.get("watch_calls", True))
+        self.watch = self._check(c, "calls", "Offer to record calls and meetings", cfg.get("watch_calls", True))
         row = self._next("calls")
         ttk.Label(c, text="Silence warning").grid(row=row, column=0, sticky="w", pady=px(3))
         sil = ttk.Frame(c)
@@ -1024,7 +1024,8 @@ class SettingsDialog:
         self.silence = tk.StringVar(value=str(cfg.get("silence_minutes", 5)))
         ttk.Spinbox(sil, from_=0, to=60, width=5, textvariable=self.silence).grid(row=0, column=0)
         ttk.Label(sil, text="minutes (0 = off)", style="Muted.TLabel").grid(row=0, column=1, padx=px(8))
-        self._hint(c, "calls", "Asks before recording. Stops by itself 30 s after a call ends or goes quiet.")
+        self._hint(c, "calls", "Teams, Zoom, Webex, calls in the browser (Meet, Teams, Zoom web), and Outlook\n"
+                               "meetings as they start. Asks first; stops 30 s after a call ends or goes quiet.")
         self.meet_names = self._check(c, "calls", "Name recordings after the meeting", cfg.get("meeting_names", True))
         self._hint(c, "calls", "Title and attendees from classic Outlook's calendar (if Outlook is open),\n"
                                "else the Teams meeting name. Read on this PC only.")
@@ -1348,6 +1349,7 @@ class App:
         self._setup_tray()
         root.protocol("WM_DELETE_WINDOW", self.hide_or_quit)
         root.after(2000, self._poll_calls)
+        root.after(20_000, self._poll_meeting_start)
         root.after(1000, self._poll_show_flag)
         root.after(3000, self._poll_recent)
         self.dictation = DictationUI(self)
@@ -1607,6 +1609,35 @@ class App:
             except Exception:
                 pass
         self.root.after(3000, self._poll_calls)
+
+    def _poll_meeting_start(self):
+        """Once a minute: an Outlook meeting starting now (a room meeting has no call to notice) -> ask once."""
+        self.root.after(60_000, self._poll_meeting_start)
+        if not (self.cfg.get("watch_calls", True) and self.cfg.get("meeting_names", True)) or self.recording:
+            return
+        if getattr(self, "_meeting_look", False):
+            return
+        self._meeting_look = True
+
+        def look():
+            try:
+                m = mi.starting_meeting()
+            finally:
+                self._meeting_look = False
+            if m:
+                self.root.after(0, lambda: self._offer_meeting(m))
+        threading.Thread(target=look, daemon=True).start()
+
+    def _offer_meeting(self, m):
+        key = (m.get("title"), m.get("start"))
+        asked = self.__dict__.setdefault("_asked_meetings", set())
+        if key in asked or self.recording or (self.start_popup and self.start_popup.alive):
+            return
+        asked.add(key)
+        self.start_popup = Popup(self.root, APP, f"\"{m.get('title') or 'A meeting'}\" starts now (Outlook). "
+                                 "Record it?\nTell the others that you are recording.",
+                                 [("Record", self.start), ("Ignore", lambda: None)], countdown=120,
+                                 countdown_text="This closes in {s} s")
 
     def on_call_start(self, app):
         if self.recording:

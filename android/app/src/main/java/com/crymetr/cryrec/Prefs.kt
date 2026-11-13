@@ -44,6 +44,10 @@ class Prefs(context: Context) {
     var mic: String
         get() = sp.getString("mic", "phone")!!
         set(v) = sp.edit().putString("mic", v).apply()
+    /** Ask to record when a meeting in the phone's calendar starts. */
+    var calendarPrompt: Boolean
+        get() = sp.getBoolean("calendar_prompt", false)
+        set(v) = sp.edit().putBoolean("calendar_prompt", v).apply()
     /** Listen mode turns itself off after this many hours. */
     var listenHours: Int
         get() = sp.getInt("listen_hours", 3)

@@ -73,6 +73,7 @@ class MainActivity : Activity() {
         lastListKey = ""
         showListen()
         refreshListen = { runOnUiThread { showListen() } }
+        Thread { runCatching { CalendarPrompt.schedule(applicationContext) } }.start()
         ui.post(tick)
         ui.post(meterTick)
         // Pick up recordings that were queued while the server was not set or the app was closed.

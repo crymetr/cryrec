@@ -32,6 +32,8 @@ class SettingsActivity : Activity() {
     private lateinit var bubbleState: TextView
     private lateinit var updateState: TextView
     private lateinit var autoUpdate: CheckBox
+    private lateinit var calendar: CheckBox
+    private val REQ_CALENDAR = 7
     private lateinit var allowInstalls: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -96,6 +98,23 @@ class SettingsActivity : Activity() {
         kb.addView(button("Turn on keyboard") { startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS)) })
         kb.addView(button("Switch keyboard") { getSystemService(InputMethodManager::class.java).showInputMethodPicker() })
         form.addView(kb)
+
+        header("Meetings")
+        hint("When a meeting in this phone's calendar starts, CryRec asks with a notification whether to record it. " +
+            "It reads only the start times and titles, on the phone. It never records by itself.")
+        calendar = CheckBox(this).apply {
+            text = "Ask when a calendar meeting starts"
+            isChecked = p.calendarPrompt && checkSelfPermission(android.Manifest.permission.READ_CALENDAR) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+            setTextColor(getColor(R.color.text))
+            setOnCheckedChangeListener { _, on ->
+                if (on && checkSelfPermission(android.Manifest.permission.READ_CALENDAR) !=
+                    android.content.pm.PackageManager.PERMISSION_GRANTED)
+                    requestPermissions(arrayOf(android.Manifest.permission.READ_CALENDAR,
+                        android.Manifest.permission.POST_NOTIFICATIONS), REQ_CALENDAR)
+            }
+        }
+        form.addView(calendar)
 
         header("Floating mic")
         hint("A small mic button that shows just above the keyboard whenever you type, in any app, with any keyboard. " +
@@ -168,6 +187,14 @@ class SettingsActivity : Activity() {
         p.polish = polish.isChecked
         p.vocabulary = vocab.text.toString()
         p.autoUpdate = autoUpdate.isChecked
+        p.calendarPrompt = calendar.isChecked &&
+            checkSelfPermission(android.Manifest.permission.READ_CALENDAR) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        Thread { CalendarPrompt.schedule(applicationContext) }.start()
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        if (requestCode == REQ_CALENDAR && checkSelfPermission(android.Manifest.permission.READ_CALENDAR) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED) calendar.isChecked = false
     }
 
     private fun header(t: String) = form.addView(TextView(this).apply {
