@@ -87,6 +87,15 @@ class Session(val dir: File) {
         fun all(context: Context): List<Session> =
             (root(context).listFiles { f -> f.isDirectory } ?: emptyArray()).sortedByDescending { it.name }.map { Session(it) }
 
+        /** The process died mid-way: a half-written m4a can't be read, a half-done job can be redone (or picked up). */
+        fun recoverInterrupted(context: Context) {
+            if (RecorderService.recording != null || RecorderService.processing.get()) return
+            for (s in all(context)) when (s.status) {
+                "recording" -> s.update("status" to "failed", "error" to "The recording was interrupted.")
+                "working" -> s.update("status" to "queued", "detail" to null)
+            }
+        }
+
         fun find(context: Context, name: String) = File(root(context), name).takeIf { it.isDirectory }?.let { Session(it) }
     }
 }

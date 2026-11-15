@@ -113,9 +113,9 @@ class RecorderService : Service() {
         try {
             if (s.kind == "note") return processNote(s, p, api, isCancelled, ::step)
             if (!s.transcript.exists()) {
-                step("uploading")
-                val id = api.submit(s.audio, p.language, s.name, p.vocabulary)
-                val j = api.waitJob(id, isCancelled) { step(it.ifEmpty { "transcribing" }) }
+                val j = transcriptJob(s, api, isCancelled, ::step) {
+                    api.submit(s.audio, p.language, s.name, p.vocabulary)
+                }
                 s.srt.writeText(j.optString("srt"))
                 s.transcript.writeText(j.optString("txt"))
                 j.optJSONObject("speakers")?.let { File(s.dir, "speakers.json").writeText(it.toString(1)) }
@@ -160,9 +160,9 @@ class RecorderService : Service() {
     private fun processNote(s: Session, p: Prefs, api: Api, isCancelled: () -> Boolean, step: (String) -> Unit) {
         try {
             if (!s.transcript.exists()) {
-                step("uploading")
-                val id = api.submit(s.audio, p.language, s.name, p.vocabulary, speakers = false)
-                val j = api.waitJob(id, isCancelled) { step(it.ifEmpty { "transcribing" }) }
+                val j = transcriptJob(s, api, isCancelled, step) {
+                    api.submit(s.audio, p.language, s.name, p.vocabulary, speakers = false)
+                }
                 s.srt.writeText(j.optString("srt"))
                 s.transcript.writeText(j.optString("txt"))
             }
@@ -181,6 +181,22 @@ class RecorderService : Service() {
         } finally {
             cancelled.remove(s.name)
         }
+    }
+
+    /** The transcript job's result. A job sent before the app was stopped is picked up on the server (it keeps
+     *  results 24 h) instead of uploading and transcribing the whole recording again. */
+    private fun transcriptJob(s: Session, api: Api, isCancelled: () -> Boolean, step: (String) -> Unit,
+                              submit: () -> String): JSONObject {
+        s.state().optString("job").takeIf { it.isNotEmpty() }?.let { old ->
+            step("picking up the transcript")
+            runCatching { return api.waitJob(old, isCancelled) { step(it.ifEmpty { "transcribing" }) }.also { s.update("job" to null) } }
+                .onFailure { if (isCancelled()) throw it }
+            s.update("job" to null)  // gone or failed on the server: send it again
+        }
+        step("uploading")
+        val id = submit()
+        s.update("job" to id)
+        return api.waitJob(id, isCancelled) { step(it.ifEmpty { "transcribing" }) }.also { s.update("job" to null) }
     }
 
     private fun refreshForeground() {

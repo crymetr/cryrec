@@ -168,6 +168,10 @@ class UpdatedReceiver : BroadcastReceiver() {
         if (intent.action != Intent.ACTION_MY_PACKAGE_REPLACED) return
         Prefs(c).lastUpdateError = ""
         Updater.schedule(c)
+        // the update stopped the app: carry on with recordings that were waiting or half sent
+        Session.recoverInterrupted(c)
+        if (Prefs(c).configured && Session.all(c).any { it.status == "queued" })
+            runCatching { RecorderService.send(c, RecorderService.ACTION_PROCESS) }
         Updater.notify(c, "CryRec updated to ${Updater.currentVersion(c)}", "Tap to open.",
             Intent(c, MainActivity::class.java))
     }

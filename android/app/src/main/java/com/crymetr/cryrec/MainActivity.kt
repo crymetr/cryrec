@@ -102,14 +102,7 @@ class MainActivity : Activity() {
         super.onPause()
     }
 
-    /** The process died mid-way: a half-written m4a can't be read, a half-done job can be redone. */
-    private fun recoverInterrupted() {
-        if (RecorderService.recording != null || RecorderService.processing.get()) return
-        for (s in Session.all(this)) when (s.status) {
-            "recording" -> s.update("status" to "failed", "error" to "The recording was interrupted.")
-            "working" -> s.update("status" to "queued", "detail" to null)
-        }
-    }
+    private fun recoverInterrupted() = Session.recoverInterrupted(this)
 
     private lateinit var listen: TextView
     private lateinit var modeMeeting: TextView
