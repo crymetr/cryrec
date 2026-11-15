@@ -160,6 +160,7 @@ The server only listens on localhost. Put HTTPS in front of it (Cloudflare Tunne
 - `/health` also reports the NVIDIA power limit and P-state, handy for an outside watchdog.
 - `share_dir`: a folder for the phone's **Send to my PC** (below) and for sent voice notes. Each share lands in its own subfolder: `share.json` (the shared text or link, its subject and your note; a voice note adds `kind` and `voice_note`), the files under `files\`, and an empty `ready` file written last. What happens next is up to you: a script that watches the folder can open, file or forward each share. Empty (the default) turns sharing off.
 - `embed_model`: the Ollama embedding model for meaning search (`POST /embed`), default `embeddinggemma`. Pull it once on the server: `ollama pull embeddinggemma`.
+- `dictation_keep_days`: keep each dictation's audio, what the speech model heard and the polished text this many days in `dictation_keep_dir` (default `%LOCALAPPDATA%\CryRec\dictations`), to find misheard ones. 0 (default) = off: audio is deleted as soon as it is read.
 - `ocr_model`: the Ollama vision model that reads photographed handwritten notes (`POST /ocr`) when the server has no `anthropic_api_key`, default `gemma3:4b`. With a key, the cloud model reads them.
 - `voices_file`: where the server keeps the voices clients named (phone recordings get Speaker 1, 2... when the app asks for it). Empty (the default) = `voices.json` next to `server.json`. Only numbers describing each voice are stored, never audio.
 

@@ -5,7 +5,7 @@
 
 Put it behind HTTPS (Cloudflare Tunnel, Tailscale, a reverse proxy) before exposing it.
 Config: %APPDATA%\\CryRec\\server.json (or --config PATH). Keys: key, host, port, model,
-device (auto|cuda|cpu), models_dir, jobs_dir, keep_hours, log_file, ollama_preempt (true = dictation stops
+device (auto|cuda|cpu), models_dir, jobs_dir, keep_hours, log_file, dictation_keep_days (+ dictation_keep_dir), ollama_preempt (true = dictation stops
 a request a local Ollama is still running, so both don't share the GPU; needs psutil).
 
 API (all need "Authorization: Bearer <key>"):
@@ -64,7 +64,7 @@ import diarize as dz  # noqa: E402
 import summarize as sm  # noqa: E402
 import transcribe as tr  # noqa: E402
 
-VERSION = "0.19.0"
+VERSION = "0.20.0"
 APPDATA = Path(os.environ.get("APPDATA", Path.home())) / "CryRec"
 LOCALAPPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "CryRec"
 DEFAULTS = {
@@ -94,6 +94,10 @@ DEFAULTS = {
     "ocr_model": "gemma3:4b",
     # meaning search over the client's own transcripts: a local Ollama embedding model
     "embed_model": sm.DEFAULT_EMBED_MODEL,
+    # keep each dictation (audio + what Whisper heard + the polished text) this many days, to find misheard ones;
+    # 0 = off (audio is deleted at once, as before)
+    "dictation_keep_days": 0,
+    "dictation_keep_dir": str(LOCALAPPDATA / "dictations"),
 }
 MAX_VOCAB = 64 * 1024
 JPEG_MAGIC = bytes([0xFF, 0xD8, 0xFF])
@@ -218,6 +222,7 @@ class Jobs:
     def _run_dictate(self, job, engine):
         tmp = self.root / f"{job['id']}.{job['ext']}"
         tmp.write_bytes(job.pop("audio"))
+        kept = self._keep_dictation_audio(tmp, job)
         try:
             audio = tr.load_audio(tmp)
         finally:
@@ -232,6 +237,38 @@ class Jobs:
             model = job["model"] if str(job.get("model", "")).startswith("claude-") else self.cfg["claude_model"]
             text = sm.polish_dictation(raw, sm.ClaudeNotes(self.cfg["anthropic_api_key"], model), terms)
         job["raw"], job["result"] = raw, text
+        if kept:
+            try:
+                kept.with_suffix(".json").write_text(json.dumps({
+                    "time": time.strftime("%Y-%m-%d %H:%M:%S"), "language": job["language"], "seconds": job["seconds"],
+                    "polished": bool(job["polish"]), "model": job.get("model") or "", "raw": raw, "result": text},
+                    ensure_ascii=False, indent=1), encoding="utf-8")
+            except OSError as e:
+                log(f"could not keep dictation text: {e!r}")
+
+    def _keep_dictation_audio(self, tmp, job):
+        """dictation_keep_days > 0: a copy of the clip, named by time (its .json follows once the text is there)."""
+        if float(self.cfg.get("dictation_keep_days") or 0) <= 0:
+            return None
+        try:
+            d = Path(self.cfg["dictation_keep_dir"])
+            d.mkdir(parents=True, exist_ok=True)
+            out = d / f"{time.strftime('%Y%m%d-%H%M%S')}-{job['id'][:6]}.{job['ext']}"
+            shutil.copyfile(tmp, out)
+            return out
+        except OSError as e:
+            log(f"could not keep dictation audio: {e!r}")
+            return None
+
+    def _prune_dictations(self):
+        days = float(self.cfg.get("dictation_keep_days") or 0)
+        d = Path(self.cfg.get("dictation_keep_dir") or "")
+        if days <= 0 or not d.is_dir():
+            return
+        cutoff = time.time() - days * 86400
+        for f in d.iterdir():
+            if f.is_file() and f.stat().st_mtime < cutoff:
+                f.unlink(missing_ok=True)
 
     def vocabulary(self, client_vocab=""):
         """Server list first, then the client's; parse_vocabulary drops duplicate terms."""
@@ -513,6 +550,7 @@ class Jobs:
     def _janitor(self):
         while True:
             time.sleep(600)
+            self._prune_dictations()
             cutoff = time.time() - self.cfg["keep_hours"] * 3600
             with self.lock:
                 for k in [k for k, j in self.jobs.items() if j["created"] < cutoff and j["status"] in ("done", "failed")]:
