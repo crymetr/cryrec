@@ -418,6 +418,30 @@ def read_handwriting(image, url=DEFAULT_OLLAMA_URL, model="gemma3:4b", glossary=
         raise RuntimeError(f"Could not reach Ollama at {url}: {e.reason}") from None
 
 
+def _image_for_claude(image, max_bytes=3_500_000, max_side=2400):
+    """(bytes, media type). The API takes images up to 5 MB (base64 adds a third): big photos become a smaller JPEG."""
+    png = image.startswith(bytes([0x89]) + b"PNG")
+    if len(image) <= max_bytes:
+        return image, "image/png" if png else "image/jpeg"
+    import io
+    from PIL import Image, ImageOps
+    img = ImageOps.exif_transpose(Image.open(io.BytesIO(image))).convert("RGB")
+    img.thumbnail((max_side, max_side))
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=85)
+    return buf.getvalue(), "image/jpeg"
+
+
+def read_handwriting_claude(image, claude, glossary=()):
+    """Text of a photographed page (JPEG/PNG bytes) through the cloud model: reads handwriting much better."""
+    import base64
+    data, media = _image_for_claude(image)
+    prompt = OCR_PROMPT + (("\nNames and terms that may appear: " + ", ".join(glossary[:200])) if glossary else "")
+    content = [{"type": "image", "source": {"type": "base64", "media_type": media, "data": base64.b64encode(data).decode()}},
+               {"type": "text", "text": prompt}]
+    return claude.ask("You read photographed handwritten notes.", content, lambda: False, effort="low", max_tokens=8000)[0]
+
+
 def with_handwriting(session_dir, transcript):
     """handwritten.md (pages read from photos) goes after the transcript, so the notes use it too."""
     try:

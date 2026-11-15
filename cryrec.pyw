@@ -50,7 +50,7 @@ import transcribe as tr
 import viewer
 
 APP = "CryRec"
-VERSION = "0.27.2"
+VERSION = "0.28.0"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -550,7 +550,7 @@ def _photo_for_ocr(path, max_side=2400, max_bytes=3_000_000):
 
 
 def run_handwriting(cfg, session_dir, images, progress, cancel):
-    """Read photographed pages (local vision model on your server, else Ollama on this PC) into handwritten.md.
+    """Read photographed pages (your server: its cloud model; else your own cloud key; else Ollama on this PC) into handwritten.md.
     The photos are copied into the folder's scans/. Returns the text added."""
     d = Path(session_dir)
     (d / "scans").mkdir(exist_ok=True)
@@ -568,9 +568,14 @@ def run_handwriting(cfg, session_dir, images, progress, cancel):
         n = start + i + 1
         (d / "scans" / f"page_{n:02d}{ext}").write_bytes(data)
         progress(i / len(images), f"reading page {i + 1} of {len(images)}...")
-        text = (sm.remote_ocr(cfg["server_url"], secret_get(cfg, "server_key"), data, lambda f, t: None, cancel,
-                              session_vocabulary(d)) if server else
-                sm.read_handwriting(data, cfg.get("ollama_url"), cfg.get("ocr_model") or "gemma3:4b", glossary))
+        if server:
+            text = sm.remote_ocr(cfg["server_url"], secret_get(cfg, "server_key"), data, lambda f, t: None, cancel,
+                                 session_vocabulary(d))
+        elif secret_get(cfg, "claude_key"):
+            text = sm.read_handwriting_claude(data, sm.ClaudeNotes(secret_get(cfg, "claude_key"), cfg.get("claude_model")),
+                                              glossary)
+        else:
+            text = sm.read_handwriting(data, cfg.get("ollama_url"), cfg.get("ocr_model") or "gemma3:4b", glossary)
         part = f"### Page {n}\n\n{text.strip()}\n"
         old = hw.read_text(encoding="utf-8") if hw.exists() else "# Handwritten notes\n"
         hw.write_text(old.rstrip() + "\n\n" + part, encoding="utf-8")  # page by page: a cancel keeps what was read

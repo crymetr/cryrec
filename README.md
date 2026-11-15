@@ -122,7 +122,7 @@ Measured on a public 4-person meeting squeezed to Teams-like 24 kbps audio: 94% 
 
 ## Handwritten notes
 
-Paper notes from a meeting can join its transcript. Desktop: ⋯ > **Add handwritten notes...** and pick photos. Android: open a recording > **Scan notes**: Google's document scanner (the one many apps use) finds the page edges, straightens and cleans the photo; several pages at once. The pages are read by a local vision model, on your CryRec server (`ocr_model`, default `gemma3:4b` through its Ollama) or, without a server, by Ollama on this PC. The text lands in `handwritten.md` (photos in `scans\`), shows under Notes, and the notes are written again with it. Messy handwriting comes out with mistakes; unreadable words are marked `[?]`.
+Paper notes from a meeting can join its transcript. Desktop: ⋯ > **Add handwritten notes...** and pick photos. Android: open a recording > **Scan notes**: Google's document scanner (the one many apps use) finds the page edges, straightens and cleans the photo; several pages at once. The pages are read by the cloud AI through your CryRec server's key (or, without a server, your own cloud AI key), which reads handwriting far better than a small local model; with no key at all, a local vision model through Ollama (`ocr_model`, default `gemma3:4b`). The photo goes to the cloud AI in the first two cases. The text lands in `handwritten.md` (photos in `scans\`), shows under Notes, and the notes are written again with it. Messy handwriting comes out with mistakes; unreadable words are marked `[?]`.
 
 ## Voice notes
 
@@ -160,7 +160,7 @@ The server only listens on localhost. Put HTTPS in front of it (Cloudflare Tunne
 - `/health` also reports the NVIDIA power limit and P-state, handy for an outside watchdog.
 - `share_dir`: a folder for the phone's **Send to my PC** (below) and for sent voice notes. Each share lands in its own subfolder: `share.json` (the shared text or link, its subject and your note; a voice note adds `kind` and `voice_note`), the files under `files\`, and an empty `ready` file written last. What happens next is up to you: a script that watches the folder can open, file or forward each share. Empty (the default) turns sharing off.
 - `embed_model`: the Ollama embedding model for meaning search (`POST /embed`), default `embeddinggemma`. Pull it once on the server: `ollama pull embeddinggemma`.
-- `ocr_model`: the Ollama vision model that reads photographed handwritten notes (`POST /ocr`), default `gemma3:4b`. Runs locally, never in the cloud.
+- `ocr_model`: the Ollama vision model that reads photographed handwritten notes (`POST /ocr`) when the server has no `anthropic_api_key`, default `gemma3:4b`. With a key, the cloud model reads them.
 - `voices_file`: where the server keeps the voices clients named (phone recordings get Speaker 1, 2... when the app asks for it). Empty (the default) = `voices.json` next to `server.json`. Only numbers describing each voice are stored, never audio.
 
 The API is documented at the top of `server/cryrec_server.py`.
@@ -282,5 +282,6 @@ powershell -File packaging\build.ps1
 - v0.24: drafts (follow-up email, escalation summary, handover), weekly digest, catch me up, delete old audio
 - v0.25: Ask searches by meaning too (local embedding model), across languages
 - v0.26: send action items on, forget saved voices, Ask and Draft on the phone
-- v0.27: voice notes: clean text and a to-do list instead of your voice, photos/links/text added, tasks sent to where they belong (this)
+- v0.27: voice notes: clean text and a to-do list instead of your voice, photos/links/text added, tasks sent to where they belong
+- v0.28: handwritten notes are read by the cloud AI (much better than a small local model) (this)
 - next: smarter answers over the archive, handwritten notes, better meeting detection

@@ -17,7 +17,8 @@ API (all need "Authorization: Bearer <key>"):
     POST   /voices            JSON {name, vec, seconds}: a client named a speaker (suggested next time)
     POST   /embed             JSON {texts: [...], kind: q|d} -> {vectors, model} (local Ollama embedding model)
     POST   /ask               JSON {system, user, backend: local|claude} -> {id}; job result {txt}
-    POST   /ocr               JSON {image_b64 (JPEG/PNG), vocabulary} -> {id}; job result {txt} (local vision model)
+    POST   /ocr               JSON {image_b64 (JPEG/PNG), vocabulary} -> {id}; job result {txt} (cloud model with a key,
+                              else the local vision model)
     POST   /notes             JSON {transcript, backend: local|claude, language, my_name, vocabulary} -> {id}
     POST   /clean             JSON {transcript, vocabulary} -> {id}   (Claude fixes casing/punctuation/terms)
     POST   /voicenote         JSON {transcript, backend: local|claude, vocabulary} -> {id}; job result
@@ -63,7 +64,7 @@ import diarize as dz  # noqa: E402
 import summarize as sm  # noqa: E402
 import transcribe as tr  # noqa: E402
 
-VERSION = "0.18.0"
+VERSION = "0.19.0"
 APPDATA = Path(os.environ.get("APPDATA", Path.home())) / "CryRec"
 LOCALAPPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "CryRec"
 DEFAULTS = {
@@ -89,7 +90,7 @@ DEFAULTS = {
     "share_dir": "",
     # speakers told apart on request (phone recordings): names learned from clients; empty = next to server.json
     "voices_file": "",
-    # photos of handwritten notes are read by this Ollama vision model (local only)
+    # photos of handwritten notes: read by the cloud model when there is an API key, else this Ollama vision model
     "ocr_model": "gemma3:4b",
     # meaning search over the client's own transcripts: a local Ollama embedding model
     "embed_model": sm.DEFAULT_EMBED_MODEL,
@@ -302,7 +303,8 @@ class Jobs:
     def add_ocr(self, image, vocabulary=""):
         """kind "ocr": a photographed page of handwritten notes -> text, with the local Ollama vision model."""
         job_id = uuid.uuid4().hex
-        job = {"id": job_id, "kind": "ocr", "image": image, "backend": "local", "vocab": (vocabulary or "")[:MAX_VOCAB],
+        backend = "claude" if self.cfg.get("anthropic_api_key") else "local"
+        job = {"id": job_id, "kind": "ocr", "image": image, "backend": backend, "vocab": (vocabulary or "")[:MAX_VOCAB],
                "status": "queued", "progress": 0.0, "text": "waiting", "created": time.time(),
                "cancel": threading.Event()}
         with self.lock:
@@ -322,10 +324,11 @@ class Jobs:
     def _run_text_job(self, job):
         glossary, _ = tr.parse_vocabulary(self.vocabulary(job.get("vocab")))
         prog = lambda f, t: job.update(progress=f, text=t)  # noqa: E731
-        if job["kind"] == "ocr":
-            job["txt"] = sm.read_handwriting(job.pop("image"), self.cfg["ollama_url"], self.cfg["ocr_model"], glossary)
-            return
         claude = sm.ClaudeNotes(self.cfg["anthropic_api_key"], self.cfg["claude_model"])
+        if job["kind"] == "ocr":
+            job["txt"] = (sm.read_handwriting_claude(job.pop("image"), claude, glossary) if job["backend"] == "claude"
+                          else sm.read_handwriting(job.pop("image"), self.cfg["ollama_url"], self.cfg["ocr_model"], glossary))
+            return
         if job["kind"] == "ask":
             system, user = job.pop("system"), job.pop("user")
             if job["backend"] == "local":
