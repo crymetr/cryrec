@@ -56,6 +56,14 @@ class Prefs(context: Context) {
     var gainDb: Int
         get() = sp.getInt("gain_db", 0)
         set(v) = sp.edit().putInt("gain_db", v).apply()
+    /** What the record button and the widget start: meeting | note (a voice note, see NoteActivity). */
+    var recordMode: String
+        get() = sp.getString("record_mode", "meeting")!!
+        set(v) = sp.edit().putString("record_mode", v).apply()
+    /** Which list the main screen shows: meeting | note. */
+    var listTab: String
+        get() = sp.getString("list_tab", "meeting")!!
+        set(v) = sp.edit().putString("list_tab", v).apply()
     var autoUpdate: Boolean
         get() = sp.getBoolean("auto_update", true)
         set(v) = sp.edit().putBoolean("auto_update", v).apply()

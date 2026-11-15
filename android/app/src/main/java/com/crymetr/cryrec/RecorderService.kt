@@ -11,6 +11,7 @@ import android.content.pm.ServiceInfo
 import android.os.IBinder
 import android.os.PowerManager
 import java.io.File
+import org.json.JSONObject
 import android.os.SystemClock
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -57,7 +58,7 @@ class RecorderService : Service() {
         startedAt = SystemClock.elapsedRealtime()
         recording = s.name
         startedElapsed = startedAt
-        s.update("status" to "recording", "started" to System.currentTimeMillis())
+        s.update("status" to "recording", "started" to System.currentTimeMillis(), "kind" to p.recordMode)
         QuickRecWidget.update(this)
         wakeLock = (getSystemService(POWER_SERVICE) as PowerManager)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "CryRec:record").apply { acquire(6 * 3600_000L) }
@@ -110,6 +111,7 @@ class RecorderService : Service() {
         }
         workingOn = s.name
         try {
+            if (s.kind == "note") return processNote(s, p, api, isCancelled, ::step)
             if (!s.transcript.exists()) {
                 step("uploading")
                 val id = api.submit(s.audio, p.language, s.name, p.vocabulary)
@@ -154,6 +156,33 @@ class RecorderService : Service() {
         }
     }
 
+    /** Voice note: transcript (one speaker), then the server writes the clean note and its to-do items. */
+    private fun processNote(s: Session, p: Prefs, api: Api, isCancelled: () -> Boolean, step: (String) -> Unit) {
+        try {
+            if (!s.transcript.exists()) {
+                step("uploading")
+                val id = api.submit(s.audio, p.language, s.name, p.vocabulary, speakers = false)
+                val j = api.waitJob(id, isCancelled) { step(it.ifEmpty { "transcribing" }) }
+                s.srt.writeText(j.optString("srt"))
+                s.transcript.writeText(j.optString("txt"))
+            }
+            if (!s.note.exists()) {
+                step("writing the note")
+                val backend = if (p.notesEngine == "server_claude") "claude" else "local"
+                val j = api.waitJob(api.voiceNote(s.transcript.readText(), backend, p.vocabulary), isCancelled) {
+                    step(it.ifEmpty { "writing the note" })
+                }
+                s.saveNote(j.optJSONObject("note") ?: JSONObject())
+            }
+            s.update("status" to "done", "detail" to null, "error" to null)
+        } catch (e: Exception) {
+            s.update("status" to "failed", "detail" to null,
+                "error" to if (isCancelled()) "Cancelled." else (e.message ?: e.javaClass.simpleName))
+        } finally {
+            cancelled.remove(s.name)
+        }
+    }
+
     private fun refreshForeground() {
         val rec = recorder != null
         val work = processing.get()
@@ -182,7 +211,7 @@ class RecorderService : Service() {
         if (rec) {
             val stop = PendingIntent.getService(this, 1, Intent(this, RecorderService::class.java).setAction(ACTION_STOP),
                 PendingIntent.FLAG_IMMUTABLE)
-            b.setContentTitle("Recording")
+            b.setContentTitle(if (session?.kind == "note") "Recording a voice note" else "Recording")
                 .setUsesChronometer(true)
                 .setWhen(System.currentTimeMillis() - (SystemClock.elapsedRealtime() - startedAt))
                 .addAction(Notification.Action.Builder(null, "Stop", stop).build())

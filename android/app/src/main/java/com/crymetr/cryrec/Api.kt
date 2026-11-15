@@ -77,6 +77,11 @@ class Api(private val base: String, private val key: String) {
             .put("language", if (language == "Auto") "" else language).put("my_name", myName)
             .put("vocabulary", vocabulary)).getString("id")
 
+    /** Voice note transcript -> job id; the result's "note" is {title, text, items: [{text, target}]}. */
+    fun voiceNote(transcript: String, backend: String, vocabulary: String): String =
+        json("/voicenote", JSONObject().put("transcript", transcript).put("backend", backend)
+            .put("vocabulary", vocabulary)).getString("id")
+
     fun clean(transcript: String, vocabulary: String): String =
         json("/clean", JSONObject().put("transcript", transcript).put("vocabulary", vocabulary)).getString("id")
 

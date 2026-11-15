@@ -43,13 +43,14 @@ import diarize as dz
 import dictate
 import live as lv
 import meetinginfo as mi
+import notewin
 import recall
 import summarize as sm
 import transcribe as tr
 import viewer
 
 APP = "CryRec"
-VERSION = "0.26.0"
+VERSION = "0.27.0"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -1414,8 +1415,15 @@ class App:
         self.status_lbl.grid(row=2, column=0, sticky="ew")
         self.status_full = ""
         Tooltip(self.status_lbl, self.theme, lambda: self.status_full)
-        self.rec_btn = PillButton(frm, self.theme, "●  Record", self.toggle)
-        self.rec_btn.grid(row=3, column=0, pady=(px(12), px(16)))
+        recf = ttk.Frame(frm)
+        recf.grid(row=3, column=0, pady=(px(12), px(16)))
+        self.rec_btn = PillButton(recf, self.theme, "●  Record", self.toggle)
+        self.rec_btn.grid(row=0, column=0, columnspan=2)
+        self.mode = tk.StringVar(value=self.cfg.get("record_mode", "meeting"))
+        self.mode_btns = [ttk.Radiobutton(recf, text=label, value=value, variable=self.mode, command=self._mode_changed)
+                          for value, label in (("meeting", "Meeting"), ("note", "Voice note"))]
+        for i, b in enumerate(self.mode_btns):
+            b.grid(row=1, column=i, padx=px(6), pady=(px(8), 0))
 
         # devices
         dev = ttk.Frame(frm)
@@ -1447,7 +1455,12 @@ class App:
         rh = ttk.Frame(frm)
         rh.grid(row=7, column=0, sticky="ew")
         rh.columnconfigure(0, weight=1)
-        ttk.Label(rh, text="Recent", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+        tabs = ttk.Frame(rh)
+        tabs.grid(row=0, column=0, sticky="w")
+        self.list_tab = tk.StringVar(value=self.cfg.get("list_tab", "meeting"))
+        for i, (value, label) in enumerate((("meeting", "Meetings"), ("note", "Voice notes"))):
+            ttk.Radiobutton(tabs, text=label, value=value, variable=self.list_tab,
+                            command=self._tab_changed).grid(row=0, column=i, padx=(0, px(10)))
         ttk.Button(rh, text="Open folder", style="Link.TButton", command=self.open_folder).grid(row=0, column=1)
         self.recent = ttk.Frame(frm)
         self.recent.grid(row=8, column=0, sticky="ew", pady=(px(4), 0))
@@ -1507,11 +1520,34 @@ class App:
     # ---------- recent recordings ----------
     def _recent_folders(self):
         root = Path(self.cfg.get("out_dir", str(DEFAULT_OUT))).expanduser()
+        notes = self.list_tab.get() == "note"
         try:
-            dirs = [p for p in root.iterdir() if p.is_dir() and SESSION_NAME.match(p.name)]
+            dirs = [p for p in root.iterdir() if p.is_dir() and SESSION_NAME.match(p.name)
+                    and notewin.is_note(p) == notes]
         except OSError:
             return []
         return sorted(dirs, key=lambda p: p.name, reverse=True)[:RECENT_COUNT]
+
+    def _mode_changed(self):
+        """Meeting or voice note: what Record starts next. The list follows, so the new recording shows up."""
+        if self.recording:
+            self.mode.set(self.cfg.get("record_mode", "meeting"))
+            return
+        self.cfg["record_mode"] = self.mode.get()
+        self.list_tab.set(self.mode.get())
+        self._tab_changed()
+
+    def _tab_changed(self):
+        self.cfg["list_tab"] = self.list_tab.get()
+        save_config(self.cfg)
+        self.refresh_recent(force=True)
+
+    def record_note(self):
+        """Tray: record a voice note now (or stop the running recording)."""
+        if not self.recording:
+            self.mode.set("note")
+            self._mode_changed()
+        self.toggle()
 
     def _session_state(self, d):
         """(line, kind, open_target) for one recording folder; kind is ok/busy/error/plain."""
@@ -1524,10 +1560,17 @@ class App:
             pct = f" {job['progress'] * 100:.0f}%" if job.get("progress") else ""
             return {"transcript": "Transcribing", "speakers": "Telling speakers apart", "scan": "Reading handwriting",
                     "clean": "Cleaning up",
-                    "notes": "Writing notes",
+                    "notes": "Writing notes", "note": "Writing the note",
                     "queued": "Waiting"}.get(job["stage"], job["stage"]) + pct, "busy", None
         has_t, has_n = (d / "transcript.txt").exists(), (d / "notes.md").exists()
         errors = (job or {}).get("errors", {})
+        if notewin.is_note(d):
+            if errors:
+                return "✗ " + "; ".join(errors) + " (hover for details)", "error", d
+            if notewin.written(d):
+                n = notewin.open_count(d)
+                return "✓ Note" + (f"  ·  {n} to send" if n else ""), "ok", d
+            return ("Transcript only" if has_t else "Audio only"), "plain", d
         parts = []
         if has_t and "transcript" not in errors:
             parts.append("✓ Transcript")
@@ -1553,24 +1596,30 @@ class App:
             w.destroy()
         px = self.theme.px
         if not states:
-            ttk.Label(self.recent, text="No recordings yet. Press Record when a meeting starts.",
-                      style="Muted.TLabel").grid(row=0, column=0, sticky="w", pady=px(4))
+            ttk.Label(self.recent, text="No voice notes yet. Pick Voice note, then Record." if self.list_tab.get() == "note"
+                      else "No recordings yet. Press Record when a meeting starts.", style="Muted.TLabel").grid(row=0, column=0, sticky="w", pady=px(4))
             return
         for i, (d, (line, kind, target)) in enumerate(states):
             row = ttk.Frame(self.recent)
             row.grid(row=i, column=0, sticky="ew", pady=px(3))
             row.columnconfigure(0, weight=1)
-            ttk.Label(row, text=session_when(d.name), style="Strong.TLabel").grid(row=0, column=0, sticky="w")
+            head = session_when(d.name)
+            if notewin.is_note(d) and notewin.load(d).get("title"):
+                head = f"{notewin.load(d)['title']}  ·  {session_when(d.name[:19])}"
+            ttk.Label(row, text=head, style="Strong.TLabel", width=1).grid(row=0, column=0, sticky="ew")
             style = {"error": "Error.TLabel", "ok": "Ok.TLabel"}.get(kind, "Muted.TLabel")
             lbl = ttk.Label(row, text=line, style=style, width=1)
             lbl.grid(row=1, column=0, sticky="ew")
             errs = (self.jobs.get(str(d)) or {}).get("errors", {})
             if errs:
                 Tooltip(lbl, self.theme, "\n".join(f"{k}: {v}" for k, v in errs.items()))
-            if (d / "transcript.txt").exists():
+            if notewin.is_note(d):
+                ttk.Button(row, text="Open", style="Link.TButton",
+                           command=lambda d=d: notewin.NoteWindow(self, d)).grid(row=0, column=1, rowspan=2, padx=(px(6), 0))
+            elif (d / "transcript.txt").exists():
                 ttk.Button(row, text="View", style="Link.TButton",
                            command=lambda d=d: self.open_viewer(d)).grid(row=0, column=1, rowspan=2, padx=(px(6), 0))
-            if target and (target.name == "notes.md" or not (d / "transcript.txt").exists()):
+            if target and not notewin.is_note(d) and (target.name == "notes.md" or not (d / "transcript.txt").exists()):
                 ttk.Button(row, text="Notes" if target.name == "notes.md" else "Open", style="Link.TButton",
                            command=lambda t=target: os.startfile(t)).grid(row=0, column=2, rowspan=2, padx=(px(6), 0))
             more = ttk.Button(row, text="", style="Icon.TButton", width=3)
@@ -1585,6 +1634,16 @@ class App:
     def row_menu(self, d, button):
         m = tk.Menu(self.root, tearoff=False)
         busy_here = (self.jobs.get(str(d)) or {}).get("stage")
+        if notewin.is_note(d):
+            if busy_here:
+                m.add_command(label="Cancel", command=lambda: self.cancel_one(d))
+            else:
+                m.add_command(label="Write the note again", command=lambda: self.enqueue_transcript(d))
+            m.add_command(label="View transcript", command=lambda: self.open_viewer(d),
+                          state="normal" if (d / "transcript.txt").exists() else "disabled")
+            m.add_command(label="Open folder", command=lambda: os.startfile(d))
+            m.tk_popup(button.winfo_rootx(), button.winfo_rooty() + button.winfo_height())
+            return
         if busy_here:
             m.add_command(label="Cancel", command=lambda: self.cancel_one(d))
         else:
@@ -1954,7 +2013,7 @@ class App:
         self.start_popup_call = False
         self.start_popup = Popup(self.root, APP, f"\"{m.get('title') or 'A meeting'}\" starts now (Outlook). "
                                  "Record it?\nTell the others that you are recording.",
-                                 [("Record", self.start), ("Ignore", lambda: None)], countdown=120,
+                                 [("Record", lambda: self.start("meeting")), ("Ignore", lambda: None)], countdown=120,
                                  countdown_text="This closes in {s} s")
 
     def on_call_start(self, app):
@@ -1966,7 +2025,7 @@ class App:
 
         def record():
             self.call_app = app
-            self.start()
+            self.start("meeting")
         self._call_asked_at = time.monotonic()
         self.start_popup_call = True
         self.start_popup = Popup(self.root, APP, f"{app} call started. Record it?\n"
@@ -2030,6 +2089,7 @@ class App:
             pystray.MenuItem("Open CryRec", on_ui(self.show), default=True),
             pystray.MenuItem(lambda item: "Stop recording" if self.recording else "Start recording",
                              on_ui(self.toggle)),
+            pystray.MenuItem("Record a voice note", on_ui(self.record_note), visible=lambda item: not self.recording),
             pystray.MenuItem("Mark this moment", on_ui(self.mark_moment), visible=lambda item: self.recording),
             pystray.MenuItem("Catch me up", on_ui(lambda: (self.show(), self.catch_up())),
                              visible=lambda item: self.recording),
@@ -2179,6 +2239,11 @@ class App:
                 (clean == "server_claude" and not secret_get(cfg, "server_key")):
             messagebox.showinfo(APP, "Clean up: set the cloud AI key or the server key in Settings first.")
             cfg["clean_engine"] = "off"
+        if notewin.is_note(session_dir):
+            if not llm_for(cfg):
+                messagebox.showinfo(APP, "Voice notes need a notes engine: pick one in Settings > Notes.")
+                return
+            return self._queue(session_dir, cfg, "note")
         self._queue(session_dir, cfg, "all")
 
     def _queue(self, d, cfg, mode):
@@ -2199,7 +2264,8 @@ class App:
             self.running = key
             self.t_cancel.clear()
             errors = {}
-            self._t_ui(busy=True, job=(key, {"stage": {"all": "transcript", "handwriting": "scan"}.get(mode, mode),
+            self._t_ui(busy=True, job=(key, {"stage": {"all": "transcript", "handwriting": "scan",
+                                                       "note": "transcript"}.get(mode, mode),
                                              "progress": 0,
                                              "errors": {}}))
 
@@ -2210,6 +2276,13 @@ class App:
                 self._t_ui(text=text, job=(key, {"progress": frac}))
             msg = ""
             try:
+                if mode == "note":
+                    if not (session_dir / "transcript.txt").exists() or not notewin.written(session_dir):
+                        self._transcript(cfg, session_dir, progress)  # "Write the note again" keeps the transcript
+                    stage("note")
+                    glossary, _ = tr.parse_vocabulary(session_vocabulary(session_dir))
+                    note = notewin.run_note(session_dir / "transcript.txt", llm_for(cfg), glossary, session_dir)
+                    msg = f"Note saved ({len(note['items'])} tasks)."
                 if mode == "all":
                     self._transcript(cfg, session_dir, progress)
                     msg = "Transcript saved."
@@ -2237,7 +2310,7 @@ class App:
                 if mode == "speakers":
                     n = run_speakers(session_dir, progress, self.t_cancel.is_set)
                     msg = f"{n} speakers found. Name them in View." if n else "Nothing to tell apart."
-                elif cfg.get("notes_engine", "off") != "off" and (session_dir / "transcript.txt").exists():
+                elif mode != "note" and cfg.get("notes_engine", "off") != "off" and (session_dir / "transcript.txt").exists():
                     stage("notes")
                     try:
                         run_notes(cfg, session_dir, progress, self.t_cancel.is_set)
@@ -2382,22 +2455,29 @@ class App:
         elif not self.saving:
             self.start()
 
-    def start(self):
+    def start(self, mode=None):
+        """mode: meeting | note; None = the switch. Calls and Outlook meetings always start a meeting."""
+        note = (mode or self.mode.get()) == "note"
         mic = self.inputs.get(self.in_var.get())
-        spk = self.outputs.get(self.out_var.get())
+        spk = None if note else self.outputs.get(self.out_var.get())
+        if note and not mic:
+            messagebox.showwarning(APP, "A voice note needs a microphone. Pick one first.")
+            return
         if not mic and not spk:
             messagebox.showwarning(APP, "Pick a microphone or a speaker first.")
             return
         out_root = Path(self.cfg.get("out_dir", str(DEFAULT_OUT))).expanduser()
         stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        meeting = mi.current_meeting() if self.cfg.get("meeting_names", True) else None
-        title = mi.folder_suffix((meeting or {}).get("title"))
+        meeting = mi.current_meeting() if self.cfg.get("meeting_names", True) and not note else None
+        title = "Voice note" if note else mi.folder_suffix((meeting or {}).get("title"))
         self.session_dir = out_root / (f"{stamp} {title}" if title else stamp)
         try:
             self.session_dir.mkdir(parents=True, exist_ok=True)
         except Exception as e:
             messagebox.showerror(APP, f"Cannot create the recordings folder:\n{e}\n\nPick another one in Settings > General.")
             return
+        if note:
+            notewin.save(self.session_dir, {})  # marks the folder as a voice note
         if meeting:
             mi.save(self.session_dir, meeting)
             self.root.after(1500, lambda m=meeting: self._last_time(m))
@@ -2428,7 +2508,7 @@ class App:
             return
 
         cfg = self._transcript_settings()
-        if cfg.get("auto_transcribe", True) and self._live_ok(cfg):
+        if not note and cfg.get("auto_transcribe", True) and self._live_ok(cfg):
             try:
                 self.live[str(self.session_dir)] = lv.LiveTranscript(
                     self.session_dir, [(t.path.stem, t) for t in self.tracks], lambda d, c=cfg: self._live_part(c, d))
@@ -2439,7 +2519,9 @@ class App:
         self.in_box.config(state="disabled")
         self.out_box.config(state="disabled")
         sides = " and ".join(x for x, on in (("your mic", mic), ("the other side", spk)) if on)
-        self.set_status(f"Recording {sides}")
+        self.set_status("Recording a voice note" if note else f"Recording {sides}")
+        for b in self.mode_btns:
+            b.state(["disabled"])
         self.status_full = f"Recording to {self.session_dir}"
         self.last_sound = time.monotonic()
         if self.start_popup and self.start_popup.alive:
@@ -2467,6 +2549,8 @@ class App:
         self.rec_btn.configure_button(text="Saving...", kind="stop", enabled=False)
         self.in_box.config(state="readonly")
         self.out_box.config(state="readonly")
+        for b in self.mode_btns:
+            b.state(["!disabled"])
         errors = [f"{t.role}: {t.error}" for t in self.tracks if t.error]
         self.set_status("Saving audio...")
         self.refresh_recent(force=True)

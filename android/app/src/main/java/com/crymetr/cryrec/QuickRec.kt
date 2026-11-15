@@ -14,11 +14,24 @@ import android.os.SystemClock
 import android.view.View
 import android.widget.RemoteViews
 
-/** Home screen button: one tap records, the next tap stops. */
+/** Home screen button: one tap records, the next tap stops. The label under it switches Meeting / Note. */
 class QuickRecWidget : AppWidgetProvider() {
     override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) = update(context)
 
+    override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action == ACTION_MODE && RecorderService.recording == null) {
+            val p = Prefs(context)
+            p.recordMode = if (p.recordMode == "note") "meeting" else "note"
+            update(context)
+            MainActivity.refreshMode?.invoke()
+            return
+        }
+        super.onReceive(context, intent)
+    }
+
     companion object {
+        const val ACTION_MODE = "com.crymetr.cryrec.MODE"
+
         /** Redraw every placed widget from the recorder's current state. */
         fun update(context: Context) {
             val manager = AppWidgetManager.getInstance(context)
@@ -29,7 +42,9 @@ class QuickRecWidget : AppWidgetProvider() {
             v.setImageViewResource(R.id.widget_button, if (rec) R.drawable.ic_stop else R.drawable.ic_mic)
             v.setInt(R.id.widget_button, "setBackgroundResource",
                 if (rec) R.drawable.widget_circle_rec else R.drawable.widget_circle)
-            v.setContentDescription(R.id.widget_button, if (rec) "Stop recording" else "Record")
+            val note = Prefs(context).recordMode == "note"
+            v.setContentDescription(R.id.widget_button, if (rec) "Stop recording" else if (note) "Record a voice note" else "Record a meeting")
+            v.setTextViewText(R.id.widget_label, if (note) "Note ⇄" else "Meeting ⇄")
             v.setViewVisibility(R.id.widget_label, if (rec) View.GONE else View.VISIBLE)
             v.setViewVisibility(R.id.widget_timer, if (rec) View.VISIBLE else View.GONE)
             v.setChronometer(R.id.widget_timer, RecorderService.startedElapsed, null, rec)
@@ -37,7 +52,10 @@ class QuickRecWidget : AppWidgetProvider() {
             val tap = PendingIntent.getActivity(context, 0,
                 Intent(context, QuickRecActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-            v.setOnClickPendingIntent(R.id.widget_root, tap)
+            v.setOnClickPendingIntent(R.id.widget_button, tap)
+            v.setOnClickPendingIntent(R.id.widget_label, PendingIntent.getBroadcast(context, 1,
+                Intent(context, QuickRecWidget::class.java).setAction(ACTION_MODE),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
             manager.updateAppWidget(ids, v)
         }
     }

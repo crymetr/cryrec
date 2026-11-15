@@ -51,6 +51,14 @@ class MainActivity : Activity() {
         listen = findViewById(R.id.listen)
         listen.setOnClickListener { toggleListen() }
         listen.setOnLongClickListener { pickListenHours(); true }
+        modeMeeting = findViewById(R.id.mode_meeting)
+        modeNote = findViewById(R.id.mode_note)
+        tabMeetings = findViewById(R.id.tab_meetings)
+        tabNotes = findViewById(R.id.tab_notes)
+        modeMeeting.setOnClickListener { setMode("meeting") }
+        modeNote.setOnClickListener { setMode("note") }
+        tabMeetings.setOnClickListener { Prefs(this).listTab = "meeting"; showMode() }
+        tabNotes.setOnClickListener { Prefs(this).listTab = "note"; showMode() }
         findViewById<View>(R.id.ask).setOnClickListener { startActivity(Intent(this, AskActivity::class.java)) }
         levels = findViewById(R.id.levels)
         levelText = findViewById(R.id.level_text)
@@ -73,7 +81,9 @@ class MainActivity : Activity() {
         visible = true
         lastListKey = ""
         showListen()
+        showMode()
         refreshListen = { runOnUiThread { showListen() } }
+        refreshMode = { runOnUiThread { showMode() } }
         Thread { runCatching { CalendarPrompt.schedule(applicationContext) } }.start()
         ui.post(tick)
         ui.post(meterTick)
@@ -85,6 +95,7 @@ class MainActivity : Activity() {
     override fun onPause() {
         visible = false
         refreshListen = null
+        refreshMode = null
         ui.removeCallbacks(tick)
         ui.removeCallbacks(meterTick)
         super.onPause()
@@ -100,6 +111,35 @@ class MainActivity : Activity() {
     }
 
     private lateinit var listen: TextView
+    private lateinit var modeMeeting: TextView
+    private lateinit var modeNote: TextView
+    private lateinit var tabMeetings: TextView
+    private lateinit var tabNotes: TextView
+
+    /** Meeting or voice note: what the button (and the widget) records next. Locked while recording. */
+    private fun setMode(mode: String) {
+        if (RecorderService.recording != null) return
+        val p = Prefs(this)
+        p.recordMode = mode
+        p.listTab = mode  // show the list the next recording lands in
+        QuickRecWidget.update(this)
+        showMode()
+    }
+
+    private fun showMode() {
+        val p = Prefs(this)
+        val note = p.recordMode == "note"
+        modeMeeting.alpha = if (note) 0.45f else 1f
+        modeNote.alpha = if (note) 1f else 0.45f
+        findViewById<TextView>(R.id.hint).text = if (note)
+            "A note to yourself. You get clean text and a to-do list, not your voice."
+        else "Records this phone's microphone. Keeps going with the screen off."
+        val notesTab = p.listTab == "note"
+        tabMeetings.alpha = if (notesTab) 0.45f else 1f
+        tabNotes.alpha = if (notesTab) 1f else 0.45f
+        lastListKey = ""
+        refresh()
+    }
 
     /** Listen mode: asks "Record this?" when it hears a conversation. Long press = how long it stays on. */
     private fun toggleListen() {
@@ -211,7 +251,7 @@ class MainActivity : Activity() {
         } else {
             record.setImageResource(R.drawable.ic_mic)
             record.contentDescription = "Record"
-            timer.text = "Tap to record"
+            timer.text = if (Prefs(this).recordMode == "note") "Tap to record a note" else "Tap to record"
         }
         if (!Prefs(this).configured && banner.tag != "update")
             showBanner("Set your server in Settings to get transcripts and notes. Recordings are kept until then.") {
@@ -219,14 +259,14 @@ class MainActivity : Activity() {
             }
         else if (banner.tag == "setup") banner.visibility = View.GONE
 
-        val sessions = Session.all(this)
-        val rows = sessions.map { it to it.state() }
-        val key = rows.joinToString("|") { (s, st) -> s.name + st.optString("status") + st.optString("detail") }
+        val tab = Prefs(this).listTab
+        val rows = Session.all(this).map { it to it.state() }.filter { (_, st) -> st.optString("kind", "meeting") == tab }
+        val key = tab + rows.joinToString("|") { (s, st) -> s.name + st.optString("status") + st.optString("detail") }
         if (key == lastListKey) return
         lastListKey = key
         list.removeAllViews()
         if (rows.isEmpty()) {
-            list.addView(text("No recordings yet.", 14f, R.color.muted).apply { setPadding(dp(16), dp(16), dp(16), dp(16)) })
+            list.addView(text(if (tab == "note") "No voice notes yet." else "No recordings yet.", 14f, R.color.muted).apply { setPadding(dp(16), dp(16), dp(16), dp(16)) })
             return
         }
         rows.forEachIndexed { i, (s, st) ->
@@ -246,10 +286,16 @@ class MainActivity : Activity() {
             theme.resolveAttribute(android.R.attr.selectableItemBackground, tv, true)
             setBackgroundResource(tv.resourceId)
             setOnClickListener {
-                startActivity(Intent(this@MainActivity, DetailActivity::class.java).putExtra("name", s.name))
+                val screen = if (st.optString("kind") == "note") NoteActivity::class.java else DetailActivity::class.java
+                startActivity(Intent(this@MainActivity, screen).putExtra("name", s.name))
             }
         }
-        box.addView(text(s.name.replace(Regex("""(\d{2})-(\d{2})-\d{2}$"""), "$1:$2"), 16f, R.color.text))
+        box.addView(text(s.title(), 16f, R.color.text))
+        if (st.optString("kind") == "note") s.noteJson().optJSONArray("items")?.let { items ->
+            val open = (0 until items.length()).count { !items.getJSONObject(it).has("sent") }
+            if (items.length() > 0) box.addView(text(s.name.replace(Regex("""(\d{2})-(\d{2})-\d{2}$"""), "$1:$2") +
+                "  ·  " + if (open == 0) "all ${items.length()} sent" else "$open to send", 13f, R.color.muted))
+        }
         val (line, color) = statusLine(st)
         box.addView(text(line, 13f, color).apply { maxLines = 2 })
         return box
@@ -261,7 +307,7 @@ class MainActivity : Activity() {
             "recording" -> "Recording…" to R.color.accent
             "queued" -> dur + "Waiting to send" to R.color.muted
             "working" -> dur + st.optString("detail", "working").replaceFirstChar { it.uppercase() } + "…" to R.color.muted
-            "done" -> dur + "Transcript ready" to R.color.ok
+            "done" -> dur + (if (st.optString("kind") == "note") "Note ready" else "Transcript ready") to R.color.ok
             "failed" -> dur + "Failed: " + st.optString("error") to R.color.accent
             else -> dur + "Saved on this phone" to R.color.muted
         }
@@ -289,6 +335,8 @@ class MainActivity : Activity() {
         private const val REQ_LISTEN = 3
         /** Set while this screen is visible, so listen mode can update the button. */
         @Volatile var refreshListen: (() -> Unit)? = null
+        /** Set while this screen is visible, so the widget's Meeting / Note switch shows here too. */
+        @Volatile var refreshMode: (() -> Unit)? = null
         const val EXTRA_ASK_MIC = "ask_mic"
         const val REPO = "crymetr/cryrec"
         /** For the updater: show the install prompt directly only while the app is on screen. */

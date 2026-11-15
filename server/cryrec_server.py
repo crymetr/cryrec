@@ -20,12 +20,14 @@ API (all need "Authorization: Bearer <key>"):
     POST   /ocr               JSON {image_b64 (JPEG/PNG), vocabulary} -> {id}; job result {txt} (local vision model)
     POST   /notes             JSON {transcript, backend: local|claude, language, my_name, vocabulary} -> {id}
     POST   /clean             JSON {transcript, vocabulary} -> {id}   (Claude fixes casing/punctuation/terms)
+    POST   /voicenote         JSON {transcript, backend: local|claude, vocabulary} -> {id}; job result
+                              note = {title, text, items: [{text, target: tracker|crytodo|claude}]}
     POST   /dictate           JSON {audio_b64, ext, language, polish, model, vocabulary} -> {text, raw}
                               (answers on the same request; jumps the queue; keeps the model warm
                                keep_warm_minutes after use). A long clip that isn't done in 80 s
                                answers 202 {id} instead; poll GET /jobs/<id> for {result, raw, polished}
     POST   /warm              load the model now (sent when the dictation key goes down)
-    POST   /share             zip with share.json {text, note, subject} + files/<name> -> {id}
+    POST   /share             zip with share.json {text, note, subject (, kind, voice_note)} + files/<name> -> {id}
                               saved to share_dir/<id>/ (off while share_dir is empty); a "ready" file
                               is written last, so a watcher on that folder never sees a half-written share
     GET    /jobs/<id>         {status: queued|running|done|failed, progress, text, error,
@@ -61,7 +63,7 @@ import diarize as dz  # noqa: E402
 import summarize as sm  # noqa: E402
 import transcribe as tr  # noqa: E402
 
-VERSION = "0.17.0"
+VERSION = "0.18.0"
 APPDATA = Path(os.environ.get("APPDATA", Path.home())) / "CryRec"
 LOCALAPPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "CryRec"
 DEFAULTS = {
@@ -266,7 +268,7 @@ class Jobs:
         return job_id
 
     def add_text_job(self, kind, transcript, vocabulary="", backend="claude", language=None, my_name=""):
-        """kind "notes" (backend local|claude) or "clean" (always claude)."""
+        """kind "notes" / "voicenote" (backend local|claude) or "clean" (always claude)."""
         if backend not in ("local", "claude") or (kind == "clean" and backend != "claude"):
             raise ValueError("backend must be local or claude (clean: claude only)")
         if backend == "claude" and not self.cfg.get("anthropic_api_key"):
@@ -331,6 +333,14 @@ class Jobs:
                                             int(self.cfg["ollama_ctx"]))._ask(system, user, job["cancel"].is_set)
             else:
                 job["txt"] = claude.ask(system, user, job["cancel"].is_set, effort="low", max_tokens=4000)[0]
+            return
+        if job["kind"] == "voicenote":
+            if job["backend"] == "local":
+                eng = sm.OllamaNotes(self.cfg["ollama_url"], self.cfg["ollama_model"], int(self.cfg["ollama_ctx"]))
+                ask = lambda s, u: eng._ask(s, u, job["cancel"].is_set, sm.VOICE_NOTE_SCHEMA)  # noqa: E731
+            else:
+                ask = lambda s, u: claude.ask(s, u, job["cancel"].is_set, effort="low", max_tokens=8000)[0]  # noqa: E731
+            job["note"] = sm.voice_note(job.pop("transcript"), ask, glossary)
             return
         if job["kind"] == "clean":
             job["txt"], job["kept"] = sm.clean_transcript(
@@ -435,7 +445,7 @@ class Jobs:
             if not job or job["cancel"].is_set():
                 continue
             t0 = time.time()
-            if job.get("kind") in ("notes", "clean", "ocr", "ask"):
+            if job.get("kind") in ("notes", "voicenote", "clean", "ocr", "ask"):
                 job["status"], job["text"] = "running", "working on the transcript"
                 if job["backend"] == "local" and engine is not None:
                     engine.park()  # free Whisper's GPU memory for the local LLM (weights stay in RAM)
@@ -528,8 +538,11 @@ def save_share(share_dir, body):
             with z.open(info) as src, open(out / "files" / name, "wb") as dst:
                 shutil.copyfileobj(src, dst)
             names.append(name)
-    meta = {k: str(meta.get(k, "")) for k in ("text", "note", "subject")} | {
+    out_meta = {k: str(meta.get(k, "")) for k in ("text", "note", "subject")} | {
         "files": names, "received": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    if meta.get("kind") == "voice-note" and isinstance(meta.get("voice_note"), dict):
+        out_meta.update(kind="voice-note", voice_note=meta["voice_note"])  # the watcher reads it as data
+    meta = out_meta
     (out / "share.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     (out / "ready").write_text("", encoding="utf-8")
     return sid
@@ -581,6 +594,8 @@ def make_handler(cfg, jobs):
             if job["status"] == "done":
                 if job.get("kind") == "notes":
                     out["md"] = job["md"]
+                elif job.get("kind") == "voicenote":
+                    out["note"] = job["note"]
                 elif job.get("kind") == "clean":
                     out.update(txt=job["txt"], kept=job["kept"])
                 elif job.get("kind") in ("ocr", "ask"):
@@ -618,7 +633,7 @@ def make_handler(cfg, jobs):
                 if job["status"] != "done":
                     return self._send(500, {"error": job.get("error", "failed")})
                 return self._send(200, {"text": job["result"], "raw": job["raw"], "polished": job["polish"]})
-            if u.path in ("/notes", "/clean"):
+            if u.path in ("/notes", "/clean", "/voicenote"):
                 n = int(self.headers.get("Content-Length") or 0)
                 if not 0 < n <= MAX_NOTES_BODY:
                     return self._send(413, {"error": "body missing or too large"})

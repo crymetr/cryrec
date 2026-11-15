@@ -20,6 +20,33 @@ class Session(val dir: File) {
     val notes get() = File(dir, "notes.md")
     val scans get() = File(dir, "scans")
     val handwritten get() = File(dir, "handwritten.md")
+    /** Voice notes: note.json {title, text, items: [{text, target, sent}]}, added photos in attach/, extras.json. */
+    val note get() = File(dir, "note.json")
+    val attach get() = File(dir, "attach")
+    val extras get() = File(dir, "extras.json")
+    /** meeting | note */
+    val kind: String get() = state().optString("kind", "meeting")
+
+    fun noteJson(): JSONObject = try { JSONObject(note.readText()) } catch (e: Exception) { JSONObject() }
+
+    fun saveNote(j: JSONObject) = synchronized(LOCK) {
+        val tmp = File(dir, "note.tmp")
+        tmp.writeText(j.toString(1))
+        tmp.renameTo(note)
+    }
+
+    /** Things added to a voice note after it was recorded: [{kind: photo|link|text, value}] (photo value = file in attach/). */
+    fun extrasList(): org.json.JSONArray = try { org.json.JSONArray(extras.readText()) } catch (e: Exception) { org.json.JSONArray() }
+
+    fun addExtra(kind: String, value: String) = synchronized(LOCK) {
+        val a = extrasList().put(JSONObject().put("kind", kind).put("value", value))
+        val tmp = File(dir, "extras.tmp")
+        tmp.writeText(a.toString(1))
+        tmp.renameTo(extras)
+    }
+
+    /** Title for lists: the note's own title, else the date. */
+    fun title(): String = noteJson().optString("title").ifEmpty { name.replace(Regex("""(\d{2})-(\d{2})-\d{2}$"""), "$1:$2") }
 
     /** Scanned pages not read yet (handwritten.md has a "### Page N" heading for every page read). */
     fun unreadScans(): List<File> {

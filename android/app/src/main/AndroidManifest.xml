@@ -32,6 +32,7 @@
             </intent-filter>
         </activity>
         <activity android:name=".DetailActivity" android:exported="false" />
+        <activity android:name=".NoteActivity" android:exported="false" />
         <activity android:name=".AskActivity" android:exported="false"
             android:windowSoftInputMode="adjustResize" />
         <activity android:name=".SettingsActivity" android:exported="false"
