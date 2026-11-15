@@ -50,7 +50,7 @@ import transcribe as tr
 import viewer
 
 APP = "CryRec"
-VERSION = "0.27.0"
+VERSION = "0.27.1"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -499,6 +499,17 @@ def llm_for(cfg):
     if engine == "ollama":
         o = sm.OllamaNotes(cfg.get("ollama_url"), cfg.get("ollama_model"))
         return lambda s, u: o._ask(s, u, never)
+    return None
+
+
+def note_ask_for(cfg):
+    """ask(system, user) for voice notes: always the cloud model (your server's key, else your own key), whatever
+    the notes engine is; a local model barely cleans a note. None when neither key is set."""
+    if cfg.get("server_url") and secret_get(cfg, "server_key"):
+        return lambda s, u: sm.remote_ask(cfg["server_url"], secret_get(cfg, "server_key"), s, u, "claude")
+    if secret_get(cfg, "claude_key"):
+        c = sm.ClaudeNotes(secret_get(cfg, "claude_key"), cfg.get("claude_model"))
+        return lambda s, u: c.ask(s, u, lambda: False, effort="low", max_tokens=8000)[0]
     return None
 
 
@@ -2240,8 +2251,8 @@ class App:
             messagebox.showinfo(APP, "Clean up: set the cloud AI key or the server key in Settings first.")
             cfg["clean_engine"] = "off"
         if notewin.is_note(session_dir):
-            if not llm_for(cfg):
-                messagebox.showinfo(APP, "Voice notes need a notes engine: pick one in Settings > Notes.")
+            if not note_ask_for(cfg):
+                messagebox.showinfo(APP, "Voice notes are written by the cloud AI: set your server key or a cloud AI key in Settings.")
                 return
             return self._queue(session_dir, cfg, "note")
         self._queue(session_dir, cfg, "all")
@@ -2281,7 +2292,7 @@ class App:
                         self._transcript(cfg, session_dir, progress)  # "Write the note again" keeps the transcript
                     stage("note")
                     glossary, _ = tr.parse_vocabulary(session_vocabulary(session_dir))
-                    note = notewin.run_note(session_dir / "transcript.txt", llm_for(cfg), glossary, session_dir)
+                    note = notewin.run_note(session_dir / "transcript.txt", note_ask_for(cfg), glossary, session_dir)
                     msg = f"Note saved ({len(note['items'])} tasks)."
                 if mode == "all":
                     self._transcript(cfg, session_dir, progress)

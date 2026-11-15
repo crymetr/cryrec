@@ -168,8 +168,8 @@ class RecorderService : Service() {
             }
             if (!s.note.exists()) {
                 step("writing the note")
-                val backend = if (p.notesEngine == "server_claude") "claude" else "local"
-                val j = api.waitJob(api.voiceNote(s.transcript.readText(), backend, p.vocabulary), isCancelled) {
+                // always the cloud model: the local one barely cleans a note and the server's GPU is Whisper's
+                val j = api.waitJob(api.voiceNote(s.transcript.readText(), "claude", p.vocabulary), isCancelled) {
                     step(it.ifEmpty { "writing the note" })
                 }
                 s.saveNote(j.optJSONObject("note") ?: JSONObject())
