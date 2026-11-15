@@ -18,7 +18,7 @@ class Prefs(context: Context) {
         set(v) = sp.edit().putString("language", v).apply()
     /** off | server_local | server_claude */
     var notesEngine: String
-        get() = sp.getString("notes_engine", "server_local")!!
+        get() = sp.getString("notes_engine", "server_claude")!!
         set(v) = sp.edit().putString("notes_engine", v).apply()
     /** off | server_claude */
     var cleanEngine: String
@@ -76,6 +76,15 @@ class Prefs(context: Context) {
     var lastUpdateCheck: Long
         get() = sp.getLong("last_update_check", 0)
         set(v) = sp.edit().putLong("last_update_check", v).apply()
+
+    /** 0.27.2: notes, Ask and drafts move to the cloud model once (the server's GPU is kept for Whisper).
+     *  After this, a later pick in Settings stays. */
+    fun notesToCloudOnce() {
+        if (sp.getBoolean("notes_cloud_moved", false)) return
+        sp.edit().putBoolean("notes_cloud_moved", true).apply {
+            if (sp.getString("notes_engine", null) == "server_local") putString("notes_engine", "server_claude")
+        }.apply()
+    }
 
     val configured get() = serverUrl.isNotEmpty() && serverKey.isNotEmpty()
 

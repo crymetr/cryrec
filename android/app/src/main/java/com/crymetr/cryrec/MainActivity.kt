@@ -68,6 +68,7 @@ class MainActivity : Activity() {
         findViewById<View>(R.id.gain_down).setOnClickListener { stepGain(-1) }
         findViewById<View>(R.id.gain_up).setOnClickListener { stepGain(1) }
         recoverInterrupted()
+        Prefs(this).notesToCloudOnce()
         Updater.schedule(this)
         if (System.currentTimeMillis() - Prefs(this).lastUpdateCheck > 6 * 3600_000L)
             Thread { runCatching { Updater.check(this) } }.start()
