@@ -50,7 +50,7 @@ import transcribe as tr
 import viewer
 
 APP = "CryRec"
-VERSION = "0.28.1"
+VERSION = "0.28.2"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -808,6 +808,18 @@ class DictationUI:
         if self.msg.get() == text and self.hwnd:
             dictate.show_no_activate(self.hwnd, False)
 
+    def _reload_devices(self):
+        """Watcher thread: run App.load_devices on the Tk thread and wait for it."""
+        done = threading.Event()
+
+        def do():
+            try:
+                self.app.load_devices()
+            finally:
+                done.set()
+        self.root.after(0, do)
+        done.wait(5)
+
     # watcher callbacks (watcher thread)
     def _start(self):
         self.target = dictate.foreground_window()
@@ -816,7 +828,11 @@ class DictationUI:
             threading.Thread(target=tr.server_warm, args=(cfg["server_url"], secret_get(cfg, "server_key")),
                              daemon=True).start()
         try:
-            self.rec = dictate.Recorder(self.app.pa, self.app.dictation_device())
+            try:
+                self.rec = dictate.Recorder(self.app.pa, self.app.dictation_device())
+            except Exception:  # headset reconnected since launch: read the device list again, try once more
+                self._reload_devices()
+                self.rec = dictate.Recorder(self.app.pa, self.app.dictation_device())
             run_cfg = dict(cfg)
             self.chunks = dictate.ChunkedDictation(self.rec, lambda audio: run_dictation(run_cfg, audio, self.cache))
             self._show("Listening...")
@@ -2501,25 +2517,26 @@ class App:
         self.cfg.update(input=self.in_var.get(), output=self.out_var.get(), out_dir=str(out_root))
         save_config(self.cfg)
 
-        self.tracks = []
+        in_name, out_name = self.in_var.get(), self.out_var.get()
         try:
-            if spk:
-                out_dev = self._output_device_for(self.out_var.get())
-                if out_dev:
-                    self.keepalive = KeepAlive(self.pa, out_dev)
-            self.t0 = time.monotonic()
-            if mic:
-                t = Track(self.pa, mic, self.session_dir / "me.wav", pad_gaps=False)
-                t.role = "mic"
-                self.tracks.append(t)
-            if spk:
-                t = Track(self.pa, spk, self.session_dir / "them.wav", pad_gaps=True)
-                t.role = "spk"
-                self.tracks.append(t)
-            for t in self.tracks:
-                t.start(self.t0)
+            try:
+                self._open_tracks(mic, spk, out_name)
+            except Exception:
+                # The device list is read at launch. A headset that reconnected since then fails to
+                # open (PortAudio -9992 "Insufficient memory"), so read the list again and try once more.
+                self._teardown()
+                self.load_devices()
+                wanted_mic, wanted_spk = mic, spk
+                mic = self.inputs.get(in_name) if wanted_mic else None
+                spk = self.outputs.get(out_name) if wanted_spk else None
+                if (wanted_mic and not mic) or (wanted_spk and not spk):
+                    raise OSError("The picked device is not connected any more. Plug it in or pick another one.")
+                self._open_tracks(mic, spk, out_name)
         except Exception as e:
             self._teardown()
+            if getattr(e, "errno", None) == -9992:  # Windows refused to open the device, not a memory problem
+                e = ("Windows would not open the device. It may be off, asleep or connected to another "
+                     "device (phone). Reconnect it or pick another one.\n(PortAudio -9992)")
             messagebox.showerror(APP, f"Could not start recording:\n{e}")
             return
 
@@ -2544,6 +2561,24 @@ class App:
             self.start_popup.close()
         self._tray_title()
         self.refresh_recent(force=True)
+
+    def _open_tracks(self, mic, spk, out_name):
+        self.tracks = []
+        if spk:
+            out_dev = self._output_device_for(out_name)
+            if out_dev:
+                self.keepalive = KeepAlive(self.pa, out_dev)
+        self.t0 = time.monotonic()
+        if mic:
+            t = Track(self.pa, mic, self.session_dir / "me.wav", pad_gaps=False)
+            t.role = "mic"
+            self.tracks.append(t)
+        if spk:
+            t = Track(self.pa, spk, self.session_dir / "them.wav", pad_gaps=True)
+            t.role = "spk"
+            self.tracks.append(t)
+        for t in self.tracks:
+            t.start(self.t0)
 
     def _teardown(self):
         for t in self.tracks:
