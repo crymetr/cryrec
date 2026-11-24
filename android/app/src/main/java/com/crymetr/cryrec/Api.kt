@@ -131,10 +131,11 @@ class Api(private val base: String, private val key: String) {
     }
 
     /** Clip to text. Short clips answer on the same request; a long one comes back as {id} and is polled. */
-    fun dictate(audio: ByteArray, language: String, polish: Boolean, vocabulary: String): String {
+    /** style: off | clean | tidy (Prefs.DICTATION_STYLES); a server before 0.21 treats tidy as clean. */
+    fun dictate(audio: ByteArray, language: String, style: String, vocabulary: String): String {
         val r = json("/dictate", JSONObject().put("audio_b64", Base64.encodeToString(audio, Base64.NO_WRAP))
-            .put("ext", "m4a").put("language", language).put("polish", polish).put("vocabulary", vocabulary)
-            .put("model", POLISH_MODEL),
+            .put("ext", "m4a").put("language", language).put("polish", style != "off").put("style", style)
+            .put("vocabulary", vocabulary).put("model", POLISH_MODEL),
             100_000)
         if (r.has("text")) return r.optString("text")
         return waitJob(r.getString("id"), { false }) {}.optString("result")

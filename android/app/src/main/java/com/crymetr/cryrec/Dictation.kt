@@ -98,7 +98,7 @@ class Dictation(private val context: Context, private val listener: Listener) {
         sending = true
         listener.onSending()
         Thread {
-            val result = runCatching { Api(p).dictate(audio, p.language, p.polish, p.vocabulary) }
+            val result = runCatching { Api(p).dictate(audio, p.language, p.dictationStyle, p.vocabulary) }
             ui.post {
                 if (gen != generation) return@post
                 sending = false

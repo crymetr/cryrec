@@ -186,7 +186,8 @@ The API is documented at the top of `server/cryrec_server.py`.
 - **Floating mic**: a small mic button that appears a little above the keyboard while you type, in any app (web pages in Chrome too), with any keyboard (Gboard, Samsung, ...), and is gone when the keyboard is. Tap it, talk, tap again: the text goes into the field at the cursor. Long press cancels. Drag it anywhere; it remembers the side and the height. On Xiaomi/HyperOS and some other phones, allow Autostart and set battery to "No restrictions" for CryRec, or Android may stop the floating mic in the background. Turn it on in Settings > Floating mic (Android Accessibility). Because the APK does not come from Play, Android may first say "Restricted setting": App info > ⋮ > Allow restricted settings, then turn it on again. It only reads the focused text field (to insert your words); fields that refuse direct typing get a paste instead.
 - **Record widget**: long-press the home screen > Widgets > CryRec. One tap starts recording, the next tap stops it; while it records it shows the time. Tap the label under the button to switch between **Meeting** and **Voice note**.
 - **Send to my PC**: in any app's Share menu. Text, links and files go to your server's `share_dir` folder, with an optional note on what should happen with them. Needs `share_dir` set on the server.
-- Settings: server address and key (same as the desktop app), language, vocabulary, Clean up, notes engine, your name, and Polish for dictation.
+- Settings: server address and key (same as the desktop app), language, vocabulary, Clean up, notes engine, your name, and what dictation does with your words.
+- **Dictation text** (keyboard and floating mic): *Tidy it into a clear message* (default) rewrites what you said into the message you meant, for a chat or a mail: said-twice points once, grammar and word order fixed, fillers out, every fact, name, number and request kept, in the language you spoke, in your own tone. *Fix punctuation and filler words only* is the light polish. *Exactly as heard* skips the cloud AI. Tidy needs server 0.21 (an older server does the light polish).
 - Updates: the app checks GitHub Releases every 12 hours and installs a new APK by itself, never while it records, sends a recording or dictates. Allow "Install unknown apps" for CryRec once (Settings > Updates > Allow updates). Android asks you to confirm the first self-update; after that CryRec is its own installer and updates go through silently (Android 12+), with a "CryRec updated" notification.
 - Plain `http://` addresses work too (for a server on your own network or Tailscale), but the key then travels unencrypted. Use `https://` on the internet.
 
@@ -284,5 +285,6 @@ powershell -File packaging\build.ps1
 - v0.25: Ask searches by meaning too (local embedding model), across languages
 - v0.26: send action items on, forget saved voices, Ask and Draft on the phone
 - v0.27: voice notes: clean text and a to-do list instead of your voice, photos/links/text added, tasks sent to where they belong
-- v0.28: handwritten notes are read by the cloud AI (much better than a small local model) (this)
+- v0.28: handwritten notes are read by the cloud AI (much better than a small local model)
+- v0.29: phone dictation can tidy what you said into a clear message (repeats out, grammar and word order fixed) (this)
 - next: smarter answers over the archive, handwritten notes, better meeting detection

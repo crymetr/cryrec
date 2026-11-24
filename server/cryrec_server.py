@@ -23,7 +23,9 @@ API (all need "Authorization: Bearer <key>"):
     POST   /clean             JSON {transcript, vocabulary} -> {id}   (Claude fixes casing/punctuation/terms)
     POST   /voicenote         JSON {transcript, backend: local|claude, vocabulary} -> {id}; job result
                               note = {title, text, items: [{text, target: tracker|crytodo|claude}]}
-    POST   /dictate           JSON {audio_b64, ext, language, polish, model, vocabulary} -> {text, raw}
+    POST   /dictate           JSON {audio_b64, ext, language, polish, style, model, vocabulary} -> {text, raw}
+                              (style with polish: clean = punctuation + fillers, tidy = rewritten into a clear
+                               message, repeats out; missing = clean)
                               (answers on the same request; jumps the queue; keeps the model warm
                                keep_warm_minutes after use). A long clip that isn't done in 80 s
                                answers 202 {id} instead; poll GET /jobs/<id> for {result, raw, polished}
@@ -64,7 +66,7 @@ import diarize as dz  # noqa: E402
 import summarize as sm  # noqa: E402
 import transcribe as tr  # noqa: E402
 
-VERSION = "0.20.1"
+VERSION = "0.21.0"
 APPDATA = Path(os.environ.get("APPDATA", Path.home())) / "CryRec"
 LOCALAPPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "CryRec"
 DEFAULTS = {
@@ -197,13 +199,14 @@ class Jobs:
             seq = self.seq
         self.q.put((priority, seq, job_id))
 
-    def add_dictate(self, audio, ext, language, polish, model, vocabulary):
+    def add_dictate(self, audio, ext, language, polish, model, vocabulary, style="clean"):
         """Short clip -> text, optionally polished by Claude. The caller waits on job["done"]."""
         if polish and not self.cfg.get("anthropic_api_key"):
             polish = False
         job_id = uuid.uuid4().hex
         job = {"id": job_id, "kind": "dictate", "audio": audio, "ext": ext, "language": language or "Auto",
-               "polish": polish, "model": model, "vocab": (vocabulary or "")[:MAX_VOCAB], "status": "queued",
+               "polish": polish, "style": style if style in sm.DICTATION_STYLES else "clean", "model": model,
+               "vocab": (vocabulary or "")[:MAX_VOCAB], "status": "queued",
                "progress": 0.0, "text": "waiting", "created": time.time(), "cancel": threading.Event(),
                "done": threading.Event()}
         with self.lock:
@@ -238,13 +241,14 @@ class Jobs:
         text = raw
         if job["polish"] and raw:
             model = job["model"] if str(job.get("model", "")).startswith("claude-") else self.cfg["claude_model"]
-            text = sm.polish_dictation(raw, sm.ClaudeNotes(self.cfg["anthropic_api_key"], model), terms)
+            text = sm.polish_dictation(raw, sm.ClaudeNotes(self.cfg["anthropic_api_key"], model), terms, job["style"])
         job["raw"], job["result"] = raw, text
         if kept:
             try:
                 kept.with_suffix(".json").write_text(json.dumps({
                     "time": time.strftime("%Y-%m-%d %H:%M:%S"), "language": job["language"], "seconds": job["seconds"],
-                    "polished": bool(job["polish"]), "model": job.get("model") or "", "raw": raw, "result": text},
+                    "polished": bool(job["polish"]), "style": job["style"], "model": job.get("model") or "", "raw": raw,
+                    "result": text},
                     ensure_ascii=False, indent=1), encoding="utf-8")
             except OSError as e:
                 log(f"could not keep dictation text: {e!r}")
@@ -477,7 +481,7 @@ class Jobs:
                     self._run_dictate(job, engine)
                     job["status"] = "done"
                     log(f"dictate {job_id[:8]} done in {time.time() - t0:.1f}s ({job['seconds']:.0f}s audio, {len(job['result'])} chars"
-                        f"{', polished' if job['polish'] else ''})")
+                        f"{(', tidied' if job['style'] == 'tidy' else ', polished') if job['polish'] else ''})")
                 except Exception as e:
                     job["status"], job["error"] = "failed", str(e)
                     log(f"dictate {job_id[:8]} failed: {e!r}")
@@ -671,7 +675,7 @@ def make_handler(cfg, jobs):
                     return self._send(400, {"error": "bad request"})
                 ext = p.get("ext") if p.get("ext") in ("mp3", "wav", "flac", "m4a") else "mp3"
                 job = jobs.add_dictate(audio, ext, p.get("language"), bool(p.get("polish")), p.get("model"),
-                                       str(p.get("vocabulary", "")))
+                                       str(p.get("vocabulary", "")), str(p.get("style") or "clean"))
                 if not job["done"].wait(80):  # stay under proxy timeouts (Cloudflare: 100 s); the client polls
                     return self._send(202, {"id": job["id"], "status": job["status"]})
                 if job["status"] != "done":

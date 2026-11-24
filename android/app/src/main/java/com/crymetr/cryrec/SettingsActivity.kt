@@ -26,7 +26,7 @@ class SettingsActivity : Activity() {
     private lateinit var notes: Spinner
     private lateinit var clean: Spinner
     private lateinit var name: EditText
-    private lateinit var polish: CheckBox
+    private lateinit var style: Spinner
     private lateinit var vocab: EditText
     private lateinit var form: LinearLayout
     private lateinit var bubbleState: TextView
@@ -88,12 +88,10 @@ class SettingsActivity : Activity() {
 
         header("Dictation keyboard")
         hint("Talk instead of typing in any app. Turn the keyboard on, then pick it with the keyboard button at the bottom of the screen.")
-        polish = CheckBox(this).apply {
-            text = "Fix punctuation and filler words (cloud AI on your server)"
-            isChecked = p.polish
-            setTextColor(getColor(R.color.text))
-        }
-        form.addView(polish)
+        style = spinner("What to do with what you say (keyboard and floating mic)", Prefs.DICTATION_STYLES.values.toList(),
+            Prefs.DICTATION_STYLES.keys.indexOf(p.dictationStyle).coerceAtLeast(0))
+        hint("Tidy: repeats out, grammar and word order fixed, every point kept, in the language you spoke. " +
+            "Tidy and Fix use the cloud AI on your server.")
         val kb = LinearLayout(this)
         kb.addView(button("Turn on keyboard") { startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS)) })
         kb.addView(button("Switch keyboard") { getSystemService(InputMethodManager::class.java).showInputMethodPicker() })
@@ -188,7 +186,7 @@ class SettingsActivity : Activity() {
         p.cleanEngine = Prefs.CLEAN_ENGINES.keys.elementAt(clean.selectedItemPosition)
         p.notesEngine = Prefs.NOTES_ENGINES.keys.elementAt(notes.selectedItemPosition)
         p.myName = name.text.toString()
-        p.polish = polish.isChecked
+        p.dictationStyle = Prefs.DICTATION_STYLES.keys.elementAt(style.selectedItemPosition)
         p.vocabulary = vocab.text.toString()
         p.autoUpdate = autoUpdate.isChecked
         p.calendarPrompt = calendar.isChecked &&

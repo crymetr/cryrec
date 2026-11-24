@@ -24,9 +24,11 @@ class Prefs(context: Context) {
     var cleanEngine: String
         get() = sp.getString("clean_engine", "off")!!
         set(v) = sp.edit().putString("clean_engine", v).apply()
-    var polish: Boolean
-        get() = sp.getBoolean("polish", true)
-        set(v) = sp.edit().putBoolean("polish", v).apply()
+    /** What dictation (keyboard and floating mic) does with the text, see DICTATION_STYLES. Up to 0.28 this was the
+     *  "polish" checkbox; on (the default) now means tidy. */
+    var dictationStyle: String
+        get() = sp.getString("dictation_style", null) ?: if (sp.getBoolean("polish", true)) "tidy" else "off"
+        set(v) = sp.edit().putString("dictation_style", v).apply()
     var myName: String
         get() = sp.getString("my_name", "")!!
         set(v) = sp.edit().putString("my_name", v.trim()).apply()
@@ -93,5 +95,8 @@ class Prefs(context: Context) {
         val NOTES_ENGINES = linkedMapOf(
             "off" to "Off", "server_local" to "My server (local AI)", "server_claude" to "My server (cloud AI)")
         val CLEAN_ENGINES = linkedMapOf("off" to "Off", "server_claude" to "My server (cloud AI)")
+        val DICTATION_STYLES = linkedMapOf(
+            "tidy" to "Tidy it into a clear message", "clean" to "Fix punctuation and filler words only",
+            "off" to "Exactly as heard")
     }
 }
