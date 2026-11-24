@@ -332,8 +332,11 @@ def split_on_pauses(seg):
 def collapse_repeats(text):
     """ "No problem. No problem. No problem." -> "No problem."  Mhm x14 -> "Mhm." (Whisper loops on quiet audio)."""
     import re
-    # the same 1-5 word phrase three or more times in a row
-    pattern = re.compile(r"(\b(?:\w+[\s,.!?-]*){1,5}?)(?:\1){2,}", re.IGNORECASE)
+    # a short chunk looped inside one "word" ("GIGIGIGI..." x200, a Whisper hallucination) -> once
+    text = re.sub(r"\b([^\W\d_]{1,10}?)\1{2,}", r"\1", text)  # "III" -> "I" as before; letters only: 1000000 stays
+    # the same 1-5 word phrase three or more times in a row. Possessive \w++ keeps a word whole: with \w+ the
+    # engine tried every way to cut a long word into 5 pieces and froze the server (GIL held) for hours.
+    pattern = re.compile(r"(\b(?:\w++[\s,.!?-]*+){1,5}?)(?:\1){2,}", re.IGNORECASE)
     text = text.strip() + " "  # so the last repeat matches like the others
     prev = None
     while prev != text:

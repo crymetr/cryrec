@@ -64,7 +64,7 @@ import diarize as dz  # noqa: E402
 import summarize as sm  # noqa: E402
 import transcribe as tr  # noqa: E402
 
-VERSION = "0.20.0"
+VERSION = "0.20.1"
 APPDATA = Path(os.environ.get("APPDATA", Path.home())) / "CryRec"
 LOCALAPPDATA = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "CryRec"
 DEFAULTS = {
@@ -179,6 +179,9 @@ class Jobs:
         self.cfg = cfg
         self.root = Path(cfg["jobs_dir"])
         self.root.mkdir(parents=True, exist_ok=True)
+        for p in self.root.iterdir():  # audio a killed run left behind: no job survives a restart
+            if re.match(r"[0-9a-f]{32}(\.\w+)?$", p.name):
+                shutil.rmtree(p, ignore_errors=True) if p.is_dir() else p.unlink(missing_ok=True)
         self.jobs = {}
         self.q = queue.PriorityQueue()  # (priority, seq, job_id): dictation (0) goes before long jobs (1)
         self.seq = 0
